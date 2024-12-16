@@ -1,4 +1,6 @@
+import Spinner from '@/components/Spinner';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -11,6 +13,7 @@ import {
   CheckCircledIcon,
   CheckIcon,
   ExclamationTriangleIcon,
+  ReloadIcon,
 } from '@radix-ui/react-icons';
 import { ReactElement } from 'react';
 
@@ -22,26 +25,53 @@ export interface FormError {
 
 interface Props {
   formErrors: FormError[];
+  isValidating?: boolean;
+  onValidate?(): void;
 }
 
 export default function FormErrorsCard(props: Props): ReactElement {
-  const { formErrors } = props;
+  const { formErrors, isValidating, onValidate } = props;
 
   const messages = formErrorsToMessages(formErrors);
   return (
     <Card className="w-full flex flex-col">
-      <CardHeader className="flex flex-col gap-2">
-        <div className="flex flex-row items-center gap-2">
-          {messages.length != 0 ? (
-            <ExclamationTriangleIcon className="h-4 w-4 text-destructive" />
-          ) : (
-            <CheckCircledIcon className="w-4 h-4" />
-          )}
-          <CardTitle>Validations</CardTitle>
-
-          {messages.length != 0 && (
-            <Badge variant="destructive">{messages.length} Errors</Badge>
-          )}
+      <CardHeader className="flex flex-col">
+        <div className="flex flex-row items-center justify-between h-8">
+          <div className="flex flex-row items-center gap-2">
+            {messages.length != 0 ? (
+              <ExclamationTriangleIcon className="h-4 w-4 text-destructive dark:text-red-400 text-red-600" />
+            ) : (
+              <CheckCircledIcon className="w-4 h-4" />
+            )}
+            <CardTitle>Validations</CardTitle>
+            {messages.length != 0 && (
+              <Badge variant="destructive">
+                {messages.length == 1
+                  ? `${messages.length} Error`
+                  : `${messages.length} Errors`}
+              </Badge>
+            )}
+          </div>
+          <div className="flex">
+            {onValidate && (
+              <Button
+                variant="ghost"
+                className="h-4 w-4"
+                size="icon"
+                key="validate"
+                type="button"
+              >
+                {isValidating ? (
+                  <Spinner className="h-4 w-4" />
+                ) : (
+                  <ReloadIcon
+                    className="h-4 w-4"
+                    onClick={() => onValidate()}
+                  />
+                )}
+              </Button>
+            )}
+          </div>
         </div>
         <CardDescription>
           A list of schema validation errors to resolve before moving forward.

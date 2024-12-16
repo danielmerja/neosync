@@ -1,3 +1,4 @@
+version: 2
 project_name: neosync
 before:
   hooks:
@@ -15,7 +16,7 @@ builds:
       - arm64
 
     ldflags:
-      - -s -w -X 'github.com/nucleuscloud/neosync/cli/internal/version.buildDate={{.Date}}' -X 'github.com/nucleuscloud/neosync/cli/internal/version.gitCommit={{.Commit}}' -X 'github.com/nucleuscloud/neosync/cli/internal/version.gitVersion={{.Version}}' -X 'github.com/nucleuscloud/neosync/cli/internal/serverconfig.defaultBaseUrl={{ .Env.NEOSYNC_BASE_URL }}'
+      - -s -w -X 'github.com/nucleuscloud/neosync/cli/internal/version.buildDate={{.Date}}' -X 'github.com/nucleuscloud/neosync/cli/internal/version.gitCommit={{.Commit}}' -X 'github.com/nucleuscloud/neosync/cli/internal/version.gitVersion={{.Version}}' -X 'github.com/nucleuscloud/neosync/cli/internal/auth.defaultBaseUrl={{ .Env.NEOSYNC_BASE_URL }}'
 
     main: ./cmd/neosync
 
@@ -39,6 +40,7 @@ snapshot:
   name_template: "{{ incpatch .Version }}-next"
 changelog:
   disable: "{{ .Env.DISABLE_CHANGELOG }}"
+  use: github-native
   sort: desc
   filters:
     exclude:
@@ -48,7 +50,7 @@ brews:
   - repository:
       owner: nucleuscloud
       name: homebrew-tap
-    folder: Formula
+    directory: Formula
     homepage: https://www.neosync.dev
     description: CLI for interfacing with Neosync
     license: MIT

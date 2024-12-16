@@ -6,19 +6,26 @@ import OverviewContainer from '@/components/containers/OverviewContainer';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonForm from '@/components/skeleton/SkeletonForm';
 import { PageProps } from '@/components/types';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetConnection } from '@/libs/hooks/useGetConnection';
 import { getErrorMessage } from '@/util/util';
+import { createConnectQueryKey, useQuery } from '@connectrpc/connect-query';
 import { ConnectionConfig, GetConnectionResponse } from '@neosync/sdk';
+import { getConnection } from '@neosync/sdk/connectquery';
+import { useQueryClient } from '@tanstack/react-query';
 import Error from 'next/error';
+import { toast } from 'sonner';
 import RemoveConnectionButton from './components/RemoveConnectionButton';
 import { getConnectionComponentDetails } from './components/connection-component';
 
 export default function ConnectionPage({ params }: PageProps) {
   const id = params?.id ?? '';
   const { account } = useAccount();
-  const { data, isLoading, mutate } = useGetConnection(account?.id ?? '', id);
-  const { toast } = useToast();
+
+  const { data, isLoading } = useQuery(
+    getConnection,
+    { id: id },
+    { enabled: !!id }
+  );
+  const queryclient = useQueryClient();
   if (!id) {
     return <Error statusCode={404} />;
   }
@@ -35,21 +42,16 @@ export default function ConnectionPage({ params }: PageProps) {
   const connectionComponent = getConnectionComponentDetails({
     connection: data?.connection!,
     onSaved: (resp) => {
-      mutate(
-        new GetConnectionResponse({
-          connection: resp.connection,
-        })
+      const key = createConnectQueryKey(getConnection, { id });
+      queryclient.setQueryData(
+        key,
+        new GetConnectionResponse({ connection: resp.connection })
       );
-      toast({
-        title: 'Successfully updated connection!',
-        variant: 'success',
-      });
+      toast.success('Successfully updated connection!');
     },
     onSaveFailed: (err) =>
-      toast({
-        title: 'Unable to update connection',
+      toast.error('Unable to update connection', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       }),
     extraPageHeading: (
       <div className="flex flex-row items-center gap-4">
@@ -87,8 +89,11 @@ export default function ConnectionPage({ params }: PageProps) {
     },
   ];
 
-  const isPostgres =
-    data?.connection?.connectionConfig?.config.case == 'pgConfig';
+  const showSubNav =
+    data?.connection?.connectionConfig?.config.case === 'pgConfig' ||
+    data?.connection?.connectionConfig?.config.case === 'mysqlConfig' ||
+    data?.connection?.connectionConfig?.config.case === 'dynamodbConfig' ||
+    data?.connection?.connectionConfig?.config.case === 'mongoConfig';
 
   return (
     <OverviewContainer
@@ -97,7 +102,7 @@ export default function ConnectionPage({ params }: PageProps) {
     >
       <div className="connection-details-container">
         <div className="flex flex-col gap-8">
-          {isPostgres && <SubNav items={subnav} buttonClassName="" />}
+          {showSubNav && <SubNav items={subnav} buttonClassName="" />}
           <div>{connectionComponent.body}</div>
         </div>
       </div>

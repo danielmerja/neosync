@@ -21,11 +21,16 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { toast } from '@/components/ui/use-toast';
-import { useGetJobRecentRuns } from '@/libs/hooks/useGetJobRecentRuns';
-import { useGetJobRunsByJob } from '@/libs/hooks/useGetJobRunsByJob';
 import { formatDateTime, getErrorMessage } from '@/util/util';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { JobRunStatus as JobRunStatusEnum } from '@neosync/sdk';
+import {
+  cancelJobRun,
+  deleteJobRun,
+  getJobRecentRuns,
+  getJobRuns,
+  terminateJobRun,
+} from '@neosync/sdk/connectquery';
 import {
   Cross2Icon,
   DotsHorizontalIcon,
@@ -34,12 +39,8 @@ import {
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ReactElement } from 'react';
+import { toast } from 'sonner';
 import JobRunStatus from '../../../runs/components/JobRunStatus';
-import {
-  cancelJobRun,
-  removeJobRun,
-  terminateJobRun,
-} from '../../../runs/components/JobRunsTable/data-table-row-actions';
 
 interface Props {
   jobId: string;
@@ -51,15 +52,22 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
     data: recentRunsData,
     isLoading,
     error: recentRunsError,
-    mutate: recentRunsMutate,
-    isValidating,
-  } = useGetJobRecentRuns(account?.id ?? '', jobId);
+    refetch: recentRunsMutate,
+    isFetching: isValidating,
+  } = useQuery(getJobRecentRuns, { jobId }, { enabled: !!jobId });
   const {
     data: jobRunsData,
     isLoading: jobRunsLoading,
-    mutate: jobsRunsMutate,
-    isValidating: jobRunsValidating,
-  } = useGetJobRunsByJob(account?.id ?? '', jobId);
+    isFetching: jobRunsValidating,
+    refetch: jobRunsMutate,
+  } = useQuery(
+    getJobRuns,
+    { id: { case: 'jobId', value: jobId } },
+    { enabled: !!jobId }
+  );
+  const { mutateAsync: removeJobRunAsync } = useMutation(deleteJobRun);
+  const { mutateAsync: cancelJobRunAsync } = useMutation(cancelJobRun);
+  const { mutateAsync: terminateJobRunAsync } = useMutation(terminateJobRun);
 
   const recentRuns = (recentRunsData?.recentRuns ?? []).toReversed();
   const jobRunsIdMap = new Map(
@@ -71,60 +79,48 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
     return <Skeleton className="w-full h-full" />;
   }
 
-  async function onRefreshClick(): Promise<void> {
-    await Promise.all([recentRunsMutate(), jobsRunsMutate()]);
+  function onRefreshClick(): void {
+    recentRunsMutate();
+    jobRunsMutate();
   }
 
   async function onDelete(runId: string): Promise<void> {
     try {
-      await removeJobRun(runId, account?.id ?? '');
+      await removeJobRunAsync({ accountId: account?.id, jobRunId: runId });
       onRefreshClick();
-      toast({
-        title: 'Removing Job Run. This may take a minute to delete!',
-        variant: 'success',
-      });
+      toast.success('Removing Job Run. This may take a minute to delete!');
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove job run',
+      toast.error('Unable to remove job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   async function onCancel(runId: string): Promise<void> {
     try {
-      await cancelJobRun(runId, account?.id ?? '');
-      toast({
-        title: 'Canceling Job Run. This may take a minute to cancel!',
-        variant: 'success',
-      });
+      await cancelJobRunAsync({ accountId: account?.id, jobRunId: runId });
+      toast.success('Canceling Job Run. This may take a minute to cancel!');
       onRefreshClick();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to cancel job run',
+      toast.error('Unable to cancel job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   async function onTerminate(runId: string): Promise<void> {
     try {
-      await terminateJobRun(runId, account?.id ?? '');
-      toast({
-        title: 'Terminating Job Run. This may take a minute to terminate!',
-        variant: 'success',
-      });
+      await terminateJobRunAsync({ accountId: account?.id, jobRunId: runId });
+      toast.success(
+        'Terminating Job Run. This may take a minute to terminate!'
+      );
       onRefreshClick();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to terminate job run',
+      toast.error('Unable to terminate job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -137,8 +133,8 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
         </Alert>
       ) : (
         <div>
-          <div className="flex flex-row items-center px-2">
-            <CardTitle className="py-6 pl-4">Recent Job Runs</CardTitle>
+          <div className="flex flex-row items-center px-6">
+            <CardTitle className="py-6">Recent Job Runs</CardTitle>
             <Button
               className={
                 isValidating || jobRunsValidating ? 'animate-spin' : ''
@@ -151,14 +147,14 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
               <ReloadIcon className="h-4 w-4" />
             </Button>
           </div>
-          <Table className="pt-5">
+          <Table>
             <TableHeader className="bg-gray-100 dark:bg-gray-800 ">
               <TableRow>
-                <TableHead className="pl-6">Run Id</TableHead>
-                <TableHead>Start At</TableHead>
-                <TableHead>Completed At</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Action</TableHead>
+                <TableHead className="px-6">Run Id</TableHead>
+                <TableHead className="px-6">Start At</TableHead>
+                <TableHead className="px-6">Completed At</TableHead>
+                <TableHead className="px-6">Status</TableHead>
+                <TableHead className="px-6">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -166,7 +162,7 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
                 const jobRun = jobRunsIdMap.get(r.jobRunId);
                 return (
                   <TableRow key={r.jobRunId}>
-                    <TableCell className="pl-6">
+                    <TableCell className="px-6">
                       {jobRun ? (
                         <Link
                           className="hover:underline"
@@ -178,22 +174,20 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
                         <span className="font-medium">{r.jobRunId}</span>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="px-6">
                       <span className="font-medium">
                         {formatDateTime(r.startTime?.toDate())}
                       </span>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="px-6">
                       <span className="font-medium">
                         {jobRun && formatDateTime(jobRun.completedAt?.toDate())}
                       </span>
                     </TableCell>
-                    <TableCell>
-                      <span className="font-medium">
-                        <JobRunStatus status={jobRun?.status} />
-                      </span>
+                    <TableCell className="px-6">
+                      <JobRunStatus status={jobRun?.status} />
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="px-6">
                       {jobRun && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
@@ -232,8 +226,8 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
                                       Cancel
                                     </DropdownMenuItem>
                                   }
-                                  headerText="Are you sure you want to cancel this job run?"
-                                  description=""
+                                  headerText="Cancel Job Run?"
+                                  description="Are you sure you want to cancel this job run?"
                                   onConfirm={async () => onCancel(jobRun.id)}
                                   buttonText="Cancel"
                                   buttonVariant="default"
@@ -249,8 +243,8 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
                                       Terminate
                                     </DropdownMenuItem>
                                   }
-                                  headerText="Are you sure you want to terminate this job run?"
-                                  description=""
+                                  headerText="Terminate Job Run?"
+                                  description="Are you sure you want to terminate this job run?"
                                   onConfirm={async () => onTerminate(jobRun.id)}
                                   buttonText="Terminate"
                                   buttonVariant="default"
@@ -269,8 +263,8 @@ export default function JobRecentRuns({ jobId }: Props): ReactElement {
                                   Delete
                                 </DropdownMenuItem>
                               }
-                              headerText="Are you sure you want to delete this job run?"
-                              description=""
+                              headerText="Delete Job Run?"
+                              description="Are you sure you want to delete this job run?"
                               onConfirm={async () => onDelete(jobRun.id)}
                             />
                           </DropdownMenuContent>

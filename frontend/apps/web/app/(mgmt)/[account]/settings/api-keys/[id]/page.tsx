@@ -4,14 +4,16 @@ import ButtonText from '@/components/ButtonText';
 import { CopyButton } from '@/components/CopyButton';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonForm from '@/components/skeleton/SkeletonForm';
+import TruncatedText from '@/components/TruncatedText';
 import { PageProps } from '@/components/types';
 import { Alert, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useGetAccountApiKey } from '@/libs/hooks/useGetAccountApiKey';
 import { formatDateTime } from '@/util/util';
+import { useQuery } from '@connectrpc/connect-query';
 import { AccountApiKey } from '@neosync/sdk';
+import { getAccountApiKey } from '@neosync/sdk/connectquery';
 import { InfoCircledIcon, ReloadIcon } from '@radix-ui/react-icons';
 import Error from 'next/error';
 import Link from 'next/link';
@@ -24,7 +26,11 @@ export default function AccountApiKeyPage({ params }: PageProps): ReactElement {
   const id = params?.id ?? '';
   const router = useRouter();
   const { account } = useAccount();
-  const { data, isLoading } = useGetAccountApiKey(account?.id ?? '', id);
+  const { data, isLoading } = useQuery(
+    getAccountApiKey,
+    { id },
+    { enabled: !!id }
+  );
   const [sessionApiKeyValue] = useSessionStorage<
     ApiKeyValueSessionStore | undefined
   >(id, undefined);
@@ -62,7 +68,14 @@ export default function AccountApiKeyPage({ params }: PageProps): ReactElement {
     <div>
       <div className="flex flex-row items-center justify-between">
         <div className="flex flex-col justify-start">
-          <h1 className="text-xl font-bold tracking-tight">{`API Key: ${data.apiKey.name}`}</h1>
+          <h1>
+            <TruncatedText
+              text={`API Key: ${data.apiKey.name}`}
+              align="start"
+              maxWidth={500}
+              truncatedContainerClassName="text-xl font-bold tracking-tight"
+            />
+          </h1>
           <h3 className="text-muted-foreground text-sm">{data.apiKey.id}</h3>
         </div>
         <div className="flex flex-row gap-2">

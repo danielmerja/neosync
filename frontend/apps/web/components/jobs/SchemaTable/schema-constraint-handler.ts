@@ -1,12 +1,14 @@
-import { ConnectionSchemaMap } from '@/libs/hooks/useGetConnectionSchemaMap';
 import { PlainMessage } from '@bufbuild/protobuf';
 import {
   DatabaseColumn,
   ForeignConstraintTables,
   ForeignKey,
+  GetConnectionSchemaResponse,
   PrimaryConstraint,
   TransformerDataType,
-  UniqueConstraint,
+  UniqueConstraints,
+  VirtualForeignConstraint,
+  VirtualForeignKey,
 } from '@neosync/sdk';
 
 export type JobType = 'sync' | 'generate';
@@ -14,6 +16,7 @@ export type JobType = 'sync' | 'generate';
 export interface SchemaConstraintHandler {
   getIsPrimaryKey(key: ColumnKey): boolean;
   getIsForeignKey(key: ColumnKey): [boolean, string[]];
+  getIsVirtualForeignKey(key: ColumnKey): [boolean, string[]];
   getIsNullable(key: ColumnKey): boolean;
   getDataType(key: ColumnKey): string;
   getConvertedDataType(key: ColumnKey): TransformerDataType; // Returns the databases data types transformed to the Neosync Transformer Data Types
@@ -21,9 +24,11 @@ export interface SchemaConstraintHandler {
   getIsUniqueConstraint(key: ColumnKey): boolean;
   getHasDefault(key: ColumnKey): boolean;
   getIsGenerated(key: ColumnKey): boolean;
+  getGeneratedType(key: ColumnKey): string | undefined;
+  getIdentityType(key: ColumnKey): string | undefined;
 }
 
-interface ColumnKey {
+export interface ColumnKey {
   schema: string;
   table: string;
   column: string;
@@ -32,26 +37,42 @@ interface ColumnKey {
 interface ColDetails {
   isPrimaryKey: boolean;
   fk: [boolean, string[]];
+  virtualForeignKey: [boolean, string[]];
   isNullable: boolean;
   dataType: string;
   isUniqueConstraint: boolean;
   columnDefault?: string;
   generatedType?: string;
+  identityGeneration?: string;
 }
 
 export function getSchemaConstraintHandler(
-  schema: ConnectionSchemaMap,
+  schema: Record<string, GetConnectionSchemaResponse>,
   primaryConstraints: Record<string, PrimaryConstraint>,
   foreignConstraints: Record<string, ForeignConstraintTables>,
-  uniqueConstraints: Record<string, UniqueConstraint>
+  uniqueConstraints: Record<string, UniqueConstraints>,
+  virtualForeignConstraints: VirtualForeignConstraint[]
 ): SchemaConstraintHandler {
+  const vfkMap = virtualForeignConstraints.reduce(
+    (vfkMap, vfk) => {
+      const key = `${vfk.schema}.${vfk.table}`;
+      const vfkArray = vfkMap[key];
+      if (!vfkArray) {
+        vfkMap[key] = [vfk];
+      } else {
+        vfkMap[key].push(vfk);
+      }
+      return vfkMap;
+    },
+    {} as Record<string, VirtualForeignConstraint[]>
+  );
   const colmap = buildColDetailsMap(
     schema,
     primaryConstraints,
     foreignConstraints,
-    uniqueConstraints
+    uniqueConstraints,
+    vfkMap
   );
-
   return {
     getDataType(key) {
       return colmap[fromColKey(key)]?.dataType ?? '';
@@ -66,6 +87,9 @@ export function getSchemaConstraintHandler(
     getIsForeignKey(key) {
       return colmap[fromColKey(key)]?.fk ?? [false, []];
     },
+    getIsVirtualForeignKey(key) {
+      return colmap[fromColKey(key)]?.virtualForeignKey ?? [false, []];
+    },
     getIsNullable(key) {
       return colmap[fromColKey(key)]?.isNullable ?? false;
     },
@@ -79,10 +103,19 @@ export function getSchemaConstraintHandler(
       return !!colmap[fromColKey(key)];
     },
     getHasDefault(key) {
-      return !!colmap[fromColKey(key)]?.columnDefault;
+      const ckey = fromColKey(key);
+      return (
+        !!colmap[ckey]?.columnDefault || !!colmap[ckey]?.identityGeneration
+      );
     },
     getIsGenerated(key) {
       return !!colmap[fromColKey(key)]?.generatedType;
+    },
+    getGeneratedType(key) {
+      return colmap[fromColKey(key)]?.generatedType;
+    },
+    getIdentityType(key) {
+      return colmap[fromColKey(key)]?.identityGeneration;
     },
   };
 }
@@ -187,41 +220,84 @@ function mysqlTypeToTransformerDataType(
 }
 
 function buildColDetailsMap(
-  schema: ConnectionSchemaMap,
+  schema: Record<string, GetConnectionSchemaResponse>,
   primaryConstraints: Record<string, PrimaryConstraint>,
   foreignConstraints: Record<string, ForeignConstraintTables>,
-  uniqueConstraints: Record<string, UniqueConstraint>
+  uniqueConstraints: Record<string, UniqueConstraints>,
+  virtualForeignConstraints: Record<string, VirtualForeignConstraint[]>
 ): Record<string, ColDetails> {
   const colmap: Record<string, ColDetails> = {};
   //<schema.table: dbCols>
-  Object.entries(schema).forEach(([key, dbcols]) => {
+  Object.entries(schema).forEach(([key, schemaResp]) => {
     const tablePkeys = primaryConstraints[key] ?? new PrimaryConstraint();
     const primaryCols = new Set(tablePkeys.columns);
     const foreignFkeys =
       foreignConstraints[key] ?? new ForeignConstraintTables();
+    const virtualForeignKeys = virtualForeignConstraints[key] ?? [];
     const tableUniqueConstraints =
-      uniqueConstraints[key] ?? new UniqueConstraint({});
-    const uniqueConstraintCols = new Set(tableUniqueConstraints.columns);
+      uniqueConstraints[key] ?? new UniqueConstraints({});
+    const uniqueConstraintCols = tableUniqueConstraints.constraints.reduce(
+      (prev, curr) => {
+        curr.columns.forEach((c) => prev.add(c));
+        return prev;
+      },
+      new Set()
+    );
     const fkConstraints = foreignFkeys.constraints;
     const fkconstraintsMap: Record<string, ForeignKey> = {};
     fkConstraints.forEach((constraint) => {
-      fkconstraintsMap[constraint.column] =
-        constraint.foreignKey ?? new ForeignKey();
+      constraint.columns.forEach((col, idx) => {
+        if (constraint.foreignKey) {
+          fkconstraintsMap[col] = new ForeignKey({
+            table: constraint.foreignKey?.table,
+            columns: [constraint.foreignKey?.columns[idx]],
+          });
+        } else {
+          fkconstraintsMap[col] = new ForeignKey();
+        }
+      });
     });
 
-    dbcols.forEach((dbcol) => {
+    const virtualFkMap: Record<string, VirtualForeignKey> = {};
+    virtualForeignKeys.forEach((vfk) => {
+      vfk.columns.forEach((col, idx) => {
+        if (vfk.foreignKey) {
+          virtualFkMap[col] = new VirtualForeignKey({
+            schema: vfk.foreignKey.schema,
+            table: vfk.foreignKey?.table,
+            columns: [vfk.foreignKey?.columns[idx]],
+          });
+        } else {
+          virtualFkMap[col] = new VirtualForeignKey();
+        }
+      });
+    });
+
+    schemaResp.schemas.forEach((dbcol) => {
       const fk: ForeignKey | undefined = fkconstraintsMap[dbcol.column];
+      const vfk: VirtualForeignKey | undefined = virtualFkMap[dbcol.column];
       colmap[fromDbCol(dbcol)] = {
         isNullable: dbcol.isNullable === 'YES',
         dataType: dbcol.dataType,
         fk: [
           fk !== undefined,
-          fk !== undefined ? [`${fk.table}.${fk.column}`] : [],
+          fk !== undefined
+            ? fk.columns.map((column) => `${fk.table}.${column}`)
+            : [],
+        ],
+        virtualForeignKey: [
+          vfk !== undefined,
+          vfk !== undefined
+            ? vfk.columns.map(
+                (column) => `${vfk.schema}.${vfk.table}.${column}`
+              )
+            : [],
         ],
         isPrimaryKey: primaryCols.has(dbcol.column),
         isUniqueConstraint: uniqueConstraintCols.has(dbcol.column),
         columnDefault: dbcol.columnDefault,
         generatedType: dbcol.generatedType,
+        identityGeneration: dbcol.identityGeneration,
       };
     });
   });

@@ -1,25 +1,27 @@
 'use client';
 import OverviewContainer from '@/components/containers/OverviewContainer';
 import PageHeader from '@/components/headers/PageHeader';
-import { useAccount } from '@/components/providers/account-provider';
 import SkeletonForm from '@/components/skeleton/SkeletonForm';
 import { PageProps } from '@/components/types';
-import { useGetUserDefinedTransformersById } from '@/libs/hooks/useGetUserDefinedTransformerById';
 import { getTransformerDataTypesString } from '@/util/util';
+import { createConnectQueryKey, useQuery } from '@connectrpc/connect-query';
 import { GetUserDefinedTransformerByIdResponse } from '@neosync/sdk';
+import { getUserDefinedTransformerById } from '@neosync/sdk/connectquery';
+import { useQueryClient } from '@tanstack/react-query';
 import RemoveTransformerButton from './components/RemoveTransformerButton';
-import UpdateUserDefinedTransformerForm from './components/UpdateUserDefinedTransformerForm';
+import UpdateTransformerForm from './components/UpdateTransformerForm';
 
 export default function UpdateUserDefinedTransformerPage({
   params,
 }: PageProps) {
   const id = params?.id ?? '';
-  const { account } = useAccount();
 
-  const { data, isLoading, mutate } = useGetUserDefinedTransformersById(
-    account?.id ?? '',
-    id
+  const { data, isLoading } = useQuery(
+    getUserDefinedTransformerById,
+    { transformerId: id },
+    { enabled: !!id }
   );
+  const queryclient = useQueryClient();
 
   if (isLoading) {
     return (
@@ -51,10 +53,15 @@ export default function UpdateUserDefinedTransformerPage({
           <div className="flex flex-col">
             <div>
               {data?.transformer && (
-                <UpdateUserDefinedTransformerForm
+                <UpdateTransformerForm
                   currentTransformer={data.transformer}
                   onUpdated={(updatedTransformer) => {
-                    mutate(
+                    const key = createConnectQueryKey(
+                      getUserDefinedTransformerById,
+                      { transformerId: id }
+                    );
+                    queryclient.setQueryData(
+                      key,
                       new GetUserDefinedTransformerByIdResponse({
                         transformer: updatedTransformer,
                       })

@@ -90,7 +90,13 @@
     "foreignkey",
     "fkref",
     "circref",
-    "subsetimg"
+    "subsetimg",
+    "FERPA",
+    "ferpa",
+    "uuidv",
+    "Luhn",
+    "lastname",
+    "jackc"
   ],
   "flagWords": ["hte"],
   "files": ["blog/**/*.md*", "docs/**/*.md*"],

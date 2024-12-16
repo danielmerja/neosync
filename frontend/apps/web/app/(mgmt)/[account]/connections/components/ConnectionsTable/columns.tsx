@@ -4,9 +4,11 @@ import { ColumnDef } from '@tanstack/react-table';
 
 import NextLink from 'next/link';
 
+import TruncatedText from '@/components/TruncatedText';
 import { formatDateTime } from '@/util/util';
 import { PlainMessage, Timestamp } from '@bufbuild/protobuf';
-import { Connection, ConnectionConfig } from '@neosync/sdk';
+import { Connection } from '@neosync/sdk';
+import { getCategory } from '../../util';
 import { DataTableColumnHeader } from './data-table-column-header';
 import { DataTableRowActions } from './data-table-row-actions';
 
@@ -51,7 +53,7 @@ export function getColumns(
                 className="hover:underline"
                 href={`/${accountName}/connections/${row.getValue('id')}`}
               >
-                {row.getValue('name')}
+                <TruncatedText text={row.getValue('name')} align="start" />
               </NextLink>
             </span>
           </div>
@@ -85,7 +87,7 @@ export function getColumns(
         return (
           <div className="flex space-x-2">
             <span className="max-w-[500px] truncate font-medium">
-              {formatDateTime(row.getValue<Timestamp>('createdAt').toDate())}
+              {formatDateTime(row.getValue<Timestamp>('createdAt')?.toDate())}
             </span>
           </div>
         );
@@ -103,7 +105,7 @@ export function getColumns(
         return (
           <div className="flex space-x-2">
             <span className="max-w-[500px] truncate font-medium">
-              {formatDateTime(row.getValue<Timestamp>('updatedAt').toDate())}
+              {formatDateTime(row.getValue<Timestamp>('updatedAt')?.toDate())}
             </span>
           </div>
         );
@@ -125,24 +127,4 @@ export function getColumns(
       ),
     },
   ];
-}
-
-function getCategory(cc?: PlainMessage<ConnectionConfig>): string {
-  if (!cc) {
-    return '-';
-  }
-  switch (cc.config.case) {
-    case 'pgConfig':
-      return 'Postgres';
-    case 'mysqlConfig':
-      return 'MySQL';
-    case 'awsS3Config':
-      return 'AWS S3';
-    case 'openaiConfig':
-      return 'OpenAI';
-    case 'localDirConfig':
-      return 'Local Dir';
-    default:
-      return '-';
-  }
 }

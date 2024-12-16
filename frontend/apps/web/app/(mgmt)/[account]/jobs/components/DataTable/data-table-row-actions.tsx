@@ -13,9 +13,14 @@ import { useRouter } from 'next/navigation';
 
 import DeleteConfirmationDialog from '@/components/DeleteConfirmationDialog';
 import { useAccount } from '@/components/providers/account-provider';
-import { useToast } from '@/components/ui/use-toast';
 import { getErrorMessage } from '@/util/util';
+import { useMutation } from '@connectrpc/connect-query';
+import { deleteJob } from '@neosync/sdk/connectquery';
 import { DotsHorizontalIcon } from '@radix-ui/react-icons';
+import { nanoid } from 'nanoid';
+import { toast } from 'sonner';
+import { getJobCloneUrlFromJob } from '../../[id]/components/JobCloneButton';
+import { setDefaultNewJobFormValues } from '../../util';
 
 interface DataTableRowActionsProps<TData> {
   row: Row<TData>;
@@ -29,25 +34,28 @@ export function DataTableRowActions<TData>({
   const job = row.original as Job;
   const router = useRouter();
   const { account } = useAccount();
-
-  const { toast } = useToast();
+  const { mutateAsync: removeJob } = useMutation(deleteJob);
 
   async function onDelete(): Promise<void> {
     try {
-      await removeJob(account?.id ?? '', job.id);
-      toast({
-        title: 'Job removed successfully!',
-        variant: 'success',
-      });
+      await removeJob({ id: job.id });
+      toast.success('Job removed successfully!');
       onDeleted();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove job',
+      toast.error('Unable to remove job', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
+  }
+
+  function onCloneClick(): void {
+    if (!account) {
+      return;
+    }
+    const sessionToken = nanoid();
+    setDefaultNewJobFormValues(window.sessionStorage, job, sessionToken);
+    router.push(getJobCloneUrlFromJob(account, job, sessionToken));
   }
 
   return (
@@ -63,6 +71,12 @@ export function DataTableRowActions<TData>({
           onClick={() => router.push(`/${account?.name}/jobs/${job.id}`)}
         >
           View
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="cursor-pointer"
+          onClick={() => onCloneClick()}
+        >
+          Clone
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DeleteConfirmationDialog
@@ -81,15 +95,4 @@ export function DataTableRowActions<TData>({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-async function removeJob(accountId: string, jobId: string): Promise<void> {
-  const res = await fetch(`/api/accounts/${accountId}/jobs/${jobId}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
 }

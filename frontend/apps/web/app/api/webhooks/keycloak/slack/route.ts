@@ -1,7 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import got from 'got';
 import { NextRequest, NextResponse } from 'next/server';
 import * as Yup from 'yup';
 import { Block } from './block';
@@ -63,18 +62,20 @@ Example register event for google
   }
 */
 const RegisterEvent = Yup.object({
-  time: Yup.number().required(),
-  type: Yup.string().oneOf(['access.REGISTER']).required(),
+  time: Yup.number().required('The Time is required.'),
+  type: Yup.string()
+    .oneOf(['access.REGISTER'])
+    .required('The Type is required.'),
   authDetails: Yup.object({
-    userId: Yup.string().required(),
-    ipAddress: Yup.string().required(),
+    userId: Yup.string().required('The userId is required.'),
+    ipAddress: Yup.string().required('The IP Address is required.'),
   }),
   details: Yup.object({
-    email: Yup.string().required(),
+    email: Yup.string().required('The Email is required.'),
     first_name: Yup.string(),
     last_name: Yup.string(),
     identity_provider: Yup.string(),
-  }).required(),
+  }).required('The Details are required.'),
 });
 type RegisterEvent = Yup.InferType<typeof RegisterEvent>;
 
@@ -116,8 +117,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const registerEvent = await RegisterEvent.validate(JSON.parse(text));
 
-    await got.post(SLACK_WEBHOOK_URL, {
-      json: getSlackMessage(registerEvent),
+    await fetch(SLACK_WEBHOOK_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(getSlackMessage(registerEvent)),
     });
 
     return NextResponse.json({ message: 'ok', contents: JSON.parse(text) });
@@ -135,8 +140,8 @@ function verifySignature(
   untrustedSignature: string
 ): boolean {
   const signature = createHmac('sha256', secret).update(body).digest('hex');
-  const trusted = Buffer.from(signature, 'ascii');
-  const untrusted = Buffer.from(untrustedSignature, 'ascii');
+  const trusted = new Uint8Array(Buffer.from(signature, 'ascii'));
+  const untrusted = new Uint8Array(Buffer.from(untrustedSignature, 'ascii'));
   return timingSafeEqual(trusted, untrusted);
 }
 

@@ -3,15 +3,16 @@ import Spinner from '@/components/Spinner';
 import { useAccount } from '@/components/providers/account-provider';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { useToast } from '@/components/ui/use-toast';
 import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
 import { useNeosyncUser } from '@/libs/hooks/useNeosyncUser';
 import { getErrorMessage } from '@/util/util';
-import { AcceptTeamAccountInviteResponse } from '@neosync/sdk';
+import { useMutation } from '@connectrpc/connect-query';
+import { acceptTeamAccountInvite } from '@neosync/sdk/connectquery';
 import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
 import { signIn, useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ReactElement, useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 
 export default function InvitePage(): ReactElement {
   const { status } = useSession();
@@ -22,9 +23,11 @@ export default function InvitePage(): ReactElement {
   const router = useRouter();
   const [error, setError] = useState<string>();
   const isFirstRender = useRef(true);
-  const { toast } = useToast();
   const { data: systemData, isLoading: isSystemDataLoading } =
     useGetSystemAppConfig();
+  const { mutateAsync: acceptTeamInvite } = useMutation(
+    acceptTeamAccountInvite
+  );
 
   useEffect(() => {
     if (isSystemDataLoading) {
@@ -33,9 +36,7 @@ export default function InvitePage(): ReactElement {
     if (status === 'unauthenticated') {
       // signin must be called on the client for this page so the redirectUrl is properly set
       signIn(systemData?.signInProviderId).catch((err) => {
-        toast({
-          title: 'Unable to redirect to signin page',
-          variant: 'destructive',
+        toast.error('Unable to redirect to signin page', {
           description: err,
         });
       });
@@ -52,7 +53,7 @@ export default function InvitePage(): ReactElement {
       isFirstRender.current
     ) {
       isFirstRender.current = false;
-      acceptTeamInvite(token)
+      acceptTeamInvite({ token })
         .then((res) => {
           if (res.account) {
             setAccount(res.account);
@@ -87,17 +88,4 @@ export default function InvitePage(): ReactElement {
       </Card>
     </div>
   );
-}
-
-async function acceptTeamInvite(
-  token: string
-): Promise<AcceptTeamAccountInviteResponse> {
-  const res = await fetch(`/api/users/accept-invite?token=${token}`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return AcceptTeamAccountInviteResponse.fromJson(await res.json());
 }

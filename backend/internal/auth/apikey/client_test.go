@@ -13,8 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	db_queries "github.com/nucleuscloud/neosync/backend/gen/go/db"
 	"github.com/nucleuscloud/neosync/backend/internal/apikey"
-	"github.com/nucleuscloud/neosync/backend/internal/nucleusdb"
-	"github.com/nucleuscloud/neosync/backend/internal/utils"
+	"github.com/nucleuscloud/neosync/backend/internal/neosyncdb"
+	pkg_utils "github.com/nucleuscloud/neosync/backend/pkg/utils"
 	"github.com/stretchr/testify/mock"
 	"github.com/zeebo/assert"
 )
@@ -33,10 +33,10 @@ func Test_Client_InjectTokenCtx_Account(t *testing.T) {
 	client := New(mockQuerier, mockDbTx, []string{}, []string{})
 
 	fakeToken := apikey.NewV1AccountKey()
-	hashedFakeToken := utils.ToSha256(
+	hashedFakeToken := pkg_utils.ToSha256(
 		fakeToken,
 	)
-	expiresAt, err := nucleusdb.ToTimestamp(time.Now().Add(5 * time.Minute))
+	expiresAt, err := neosyncdb.ToTimestamp(time.Now().Add(5 * time.Minute))
 	assert.NoError(t, err)
 	apiKeyRecord := db_queries.NeosyncApiAccountApiKey{
 		ID:        pgtype.UUID{Valid: true},
@@ -72,10 +72,10 @@ func Test_Client_InjectTokenCtx_Account_Expired(t *testing.T) {
 	client := New(mockQuerier, mockDbTx, []string{}, []string{})
 
 	fakeToken := apikey.NewV1AccountKey()
-	hashedFakeToken := utils.ToSha256(
+	hashedFakeToken := pkg_utils.ToSha256(
 		fakeToken,
 	)
-	expiresAt, err := nucleusdb.ToTimestamp(time.Now().Add(-5 * time.Second))
+	expiresAt, err := neosyncdb.ToTimestamp(time.Now().Add(-5 * time.Second))
 	assert.NoError(t, err)
 	apiKeyRecord := db_queries.NeosyncApiAccountApiKey{
 		ID:        pgtype.UUID{Valid: true},
@@ -118,7 +118,7 @@ func Test_Client_InjectTokenCtx_Account_NotFoundKeyValue(t *testing.T) {
 	client := New(mockQuerier, mockDbTx, []string{}, []string{})
 
 	fakeToken := apikey.NewV1AccountKey()
-	hashedFakeToken := utils.ToSha256(
+	hashedFakeToken := pkg_utils.ToSha256(
 		fakeToken,
 	)
 

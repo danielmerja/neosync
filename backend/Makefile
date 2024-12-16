@@ -18,14 +18,13 @@ vet: ## Runs go vet
 build: gen vet ## Generates code, runs go vet, and builds the project
 	scripts/build.sh
 
-dbuild: gen vet ## Generates code, runs go vet, and builds the project specifically for Linux
-	GOOS=linux scripts/build.sh
+dbuild: build
 
 run: ## Runs the project
 	./bin/mgmt serve connect
 
 gen: ## Runs the gen script
-	./scripts/gen.sh
+	@cd .. && ./scripts/backend-gen.sh
 
 clean: ## Cleans the bin directory
 	rm -rf bin

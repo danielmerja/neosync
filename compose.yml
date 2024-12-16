@@ -5,6 +5,10 @@ include:
     env_file:
       - ./compose/temporal/.env
   - path: ./compose/compose-db.yml
+  # - path: ./compose/compose-db-mysql.yml
+  # - path: ./compose/compose-db-mongo.yml
+  # - path: ./compose/compose-db-dynamo.yml
+  # - path: ./compose/compose-db-mssql.yml
 
 services:
   app:
@@ -96,7 +100,7 @@ services:
 
   temporal-seed:
     container_name: neosync-temporal-seed
-    image: temporalio/admin-tools:latest
+    image: temporalio/admin-tools:1.23.0
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
     entrypoint: /bin/sh -c "/create_schedules.sh"

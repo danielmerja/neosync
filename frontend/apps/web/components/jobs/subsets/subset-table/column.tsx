@@ -1,6 +1,7 @@
 'use client';
 
-import ColumnHeader from '@/components/DualListBox/ColumnHeader';
+import TruncatedText from '@/components/TruncatedText';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -11,12 +12,14 @@ import {
 import { Pencil1Icon, ReloadIcon } from '@radix-ui/react-icons';
 import { ColumnDef } from '@tanstack/react-table';
 import { ReactElement } from 'react';
+import { SchemaColumnHeader } from '../../SchemaTable/SchemaColumnHeader';
 import { DataTableColumnHeader } from './data-table-column-header';
 
 export interface TableRow {
   schema: string;
   table: string;
   where?: string;
+  isRootTable?: boolean;
 }
 
 interface GetColumnsProps {
@@ -53,25 +56,65 @@ export function getColumns(props: GetColumnsProps): ColumnDef<TableRow>[] {
       id: 'schemaTable',
       footer: (props) => props.column.id,
       header: ({ column }) => (
-        <ColumnHeader
-          column={column}
-          title={'Table'}
-          placeholder={'Search Tables ..'}
-        />
+        <SchemaColumnHeader column={column} title={'Table'} />
       ),
+      cell: ({ row }) => {
+        return (
+          <TruncatedText
+            text={`${row.original.schema}.${row.original.table}`}
+            maxWidth={250}
+          />
+        );
+      },
+      size: 250,
+    },
+    {
+      accessorKey: 'isRootTable',
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="Root Table" />
+      ),
+      cell: ({ getValue }) => {
+        return (
+          <div className="flex justify-center pr-4">
+            {getValue<boolean>() && (
+              <TooltipProvider>
+                <Tooltip delayDuration={200}>
+                  <TooltipTrigger asChild>
+                    <div>
+                      <Badge variant="outline">Root</Badge>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs px-2 text-center mx-auto">
+                    This is a Root table that only has foreign key references to
+                    children tables. Subsetting this table will subset all of
+                    it&apos;s children tables.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </div>
+        );
+      },
     },
     {
       accessorKey: 'where',
       header: ({ column }) => (
-        <DataTableColumnHeader column={column} title="Where" />
+        <DataTableColumnHeader column={column} title="Subset Filters" />
       ),
       cell: ({ getValue }) => {
         return (
-          <div className="flex space-x-2">
-            <span className="truncate font-medium">{getValue<string>()}</span>
+          <div className="flex justify-center">
+            <span className="truncate font-medium max-w-[200px] inline-block">
+              {getValue<boolean>() && (
+                <pre className="bg-gray-100 rounded border border-gray-300 text-xs px-2 dark:bg-transparent dark:border dark:border-gray-700 whitespace-nowrap overflow-hidden text-ellipsis max-w-[100%]">
+                  {getValue<boolean>()}
+                </pre>
+              )}
+            </span>
           </div>
         );
       },
+      size: 250,
     },
     {
       accessorKey: 'edit',

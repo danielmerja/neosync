@@ -6,6 +6,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { cn } from '@/libs/utils';
 import { Cross2Icon } from '@radix-ui/react-icons';
 import {
   ColumnDef,
@@ -86,7 +87,10 @@ export default function PermissionsDataTable<TData, TValue>({
         </div>
       </div>
       <div
-        className="rounded-md border relative overflow-auto max-h-[500px] dark:border-gray-700 "
+        className={cn(
+          'rounded-md border min-h-[145px] max-h-[500px] relative border-gray-300 dark:border-gray-700 overflow-hidden',
+          rows.length > 0 && 'overflow-auto'
+        )}
         ref={tableContainerRef}
       >
         <StickyHeaderTable>
@@ -94,15 +98,15 @@ export default function PermissionsDataTable<TData, TValue>({
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow
                 key={headerGroup.id}
-                className="flex flex-row items-center justify-between w-full px-2"
+                className="flex justify-between w-full px-2"
               >
                 {headerGroup.headers.map((header) => {
                   return (
                     <TableHead
                       key={header.id}
-                      style={{ minWidth: `${header.column.getSize()}px` }}
+                      style={{ width: header.getSize() }}
                       colSpan={header.colSpan}
-                      className="flex items-center"
+                      className="flex w-full"
                     >
                       {header.isPlaceholder
                         ? null
@@ -117,19 +121,18 @@ export default function PermissionsDataTable<TData, TValue>({
             ))}
           </TableHeader>
           <TableBody
-            className="grid"
+            className="grid relative"
             style={{
               height: `${rowVirtualizer.getTotalSize()}px`, //tells scrollbar how big the table is
             }}
           >
             {rows.length === 0 && (
-              <TableRow className="flex justify-center items-center py-10 text-gray-500">
+              <TableRow className="flex justify-center items-center py-10 text-gray-500 text-sm">
                 <td>No permissions found for the connection or filter(s).</td>
               </TableRow>
             )}
             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
               const row = rows[virtualRow.index];
-
               return (
                 <TableRow
                   data-index={virtualRow.index} //needed for dynamic row height measurement
@@ -138,15 +141,15 @@ export default function PermissionsDataTable<TData, TValue>({
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,
                   }}
-                  className="items-center flex absolute w-full justify-between px-2"
+                  className="flex absolute justify-between w-full px-2"
                 >
                   {row.getVisibleCells().map((cell) => {
                     return (
                       <td
                         key={cell.id}
-                        className="py-2 text-sm"
+                        className="py-2 text-sm flex"
                         style={{
-                          minWidth: cell.column.getSize(),
+                          width: cell.column.getSize(),
                         }}
                       >
                         {flexRender(

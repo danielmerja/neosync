@@ -2,25 +2,42 @@ package shared
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"connectrpc.com/connect"
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
-	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
-	neosync_benthos "github.com/nucleuscloud/neosync/worker/internal/benthos"
+	sqlmanager_shared "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/shared"
+	neosync_benthos "github.com/nucleuscloud/neosync/worker/pkg/benthos"
 
-	http_client "github.com/nucleuscloud/neosync/worker/internal/http/client"
+	http_client "github.com/nucleuscloud/neosync/internal/http/client"
 	"github.com/spf13/viper"
 )
 
 const (
 	// The benthos value for null
 	NullString = "null"
+
+	runContext_ExternalId_BenthosConfig       = "benthosconfig"
+	runContext_ExternalId_PostTableSyncConfig = "posttablesync"
 )
+
+func GetBenthosConfigExternalId(identifier string) string {
+	return fmt.Sprintf("%s-%s", runContext_ExternalId_BenthosConfig, identifier)
+}
+
+func GetPostTableSyncConfigExternalId(identifier string) string {
+	return fmt.Sprintf("%s-%s", runContext_ExternalId_PostTableSyncConfig, identifier)
+}
+
+type PostTableSyncConfig struct {
+	DestinationConfigs map[string]*PostTableSyncDestConfig `json:"destinationConfigs"`
+}
+
+type PostTableSyncDestConfig struct {
+	Statements []string `json:"statements"` // statements to run
+}
 
 // General workflow metadata struct that is intended to be common across activities
 type WorkflowMetadata struct {
@@ -47,7 +64,7 @@ func GetNeosyncUrl() string {
 // Returns an instance of *http.Client that includes the Neosync API Token if one was found in the environment
 func GetNeosyncHttpClient() *http.Client {
 	apikey := viper.GetString("NEOSYNC_API_KEY")
-	return http_client.NewWithAuth(&apikey)
+	return http_client.NewWithBearerAuth(&apikey)
 }
 
 // Generic util method that turns any value into its pointer
@@ -95,7 +112,7 @@ func GetUniqueTablesMapFromJob(job *mgmtv1alpha1.Job) map[string]struct{} {
 		uniqueTables := map[string]struct{}{}
 		for _, schema := range jobSourceConfig.AiGenerate.Schemas {
 			for _, table := range schema.Tables {
-				uniqueTables[sql_manager.BuildTable(schema.Schema, table.Table)] = struct{}{}
+				uniqueTables[sqlmanager_shared.BuildTable(schema.Schema, table.Table)] = struct{}{}
 			}
 		}
 		return uniqueTables
@@ -108,7 +125,7 @@ func GetUniqueTablesMapFromJob(job *mgmtv1alpha1.Job) map[string]struct{} {
 func GetUniqueTablesFromMappings(mappings []*mgmtv1alpha1.JobMapping) map[string]struct{} {
 	groupedMappings := map[string][]*mgmtv1alpha1.JobMapping{}
 	for _, mapping := range mappings {
-		tableName := sql_manager.BuildTable(mapping.Schema, mapping.Table)
+		tableName := sqlmanager_shared.BuildTable(mapping.Schema, mapping.Table)
 		_, ok := groupedMappings[tableName]
 		if ok {
 			groupedMappings[tableName] = append(groupedMappings[tableName], mapping)
@@ -199,12 +216,18 @@ func GetJobSourceConnection(
 		connectionId = jobSourceConfig.Postgres.GetConnectionId()
 	case *mgmtv1alpha1.JobSourceOptions_Mysql:
 		connectionId = jobSourceConfig.Mysql.GetConnectionId()
+	case *mgmtv1alpha1.JobSourceOptions_Mssql:
+		connectionId = jobSourceConfig.Mssql.GetConnectionId()
 	case *mgmtv1alpha1.JobSourceOptions_Generate:
 		connectionId = jobSourceConfig.Generate.GetFkSourceConnectionId()
 	case *mgmtv1alpha1.JobSourceOptions_AiGenerate:
 		connectionId = jobSourceConfig.AiGenerate.GetAiConnectionId()
+	case *mgmtv1alpha1.JobSourceOptions_Mongodb:
+		connectionId = jobSourceConfig.Mongodb.GetConnectionId()
+	case *mgmtv1alpha1.JobSourceOptions_Dynamodb:
+		connectionId = jobSourceConfig.Dynamodb.GetConnectionId()
 	default:
-		return nil, errors.New("unsupported job source options type")
+		return nil, fmt.Errorf("unsupported job source options type for job source connection: %T", jobSourceConfig)
 	}
 	sourceConnection, err := GetConnectionById(ctx, connclient, connectionId)
 	if err != nil {
@@ -213,6 +236,30 @@ func GetJobSourceConnection(
 	return sourceConnection, nil
 }
 
+func GetConnectionType(connection *mgmtv1alpha1.Connection) string {
+	switch connection.GetConnectionConfig().GetConfig().(type) {
+	case *mgmtv1alpha1.ConnectionConfig_PgConfig:
+		return "postgres"
+	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig:
+		return "mysql"
+	case *mgmtv1alpha1.ConnectionConfig_MssqlConfig:
+		return "sqlserver"
+	case *mgmtv1alpha1.ConnectionConfig_AwsS3Config:
+		return "aws-s3"
+	case *mgmtv1alpha1.ConnectionConfig_GcpCloudstorageConfig:
+		return "gcp-cloud-storage"
+	case *mgmtv1alpha1.ConnectionConfig_MongoConfig:
+		return "mongodb"
+	case *mgmtv1alpha1.ConnectionConfig_DynamodbConfig:
+		return "aws-dynamodb"
+	case *mgmtv1alpha1.ConnectionConfig_LocalDirConfig:
+		return "local-directory"
+	case *mgmtv1alpha1.ConnectionConfig_OpenaiConfig:
+		return "openai"
+	default:
+		return "unknown"
+	}
+}
 func GetConnectionById(
 	ctx context.Context,
 	connclient mgmtv1alpha1connect.ConnectionServiceClient,
@@ -227,10 +274,36 @@ func GetConnectionById(
 	return getConnResp.Msg.Connection, nil
 }
 
-func SplitTableKey(key string) (schema, table string) {
-	pieces := strings.Split(key, ".")
-	if len(pieces) == 1 {
-		return "public", pieces[0]
+type SqlJobDestinationOpts struct {
+	TruncateBeforeInsert bool
+	TruncateCascade      bool
+	InitSchema           bool
+}
+
+func GetSqlJobDestinationOpts(
+	options *mgmtv1alpha1.JobDestinationOptions,
+) (*SqlJobDestinationOpts, error) {
+	if options == nil {
+		return &SqlJobDestinationOpts{}, nil
 	}
-	return pieces[0], pieces[1]
+	switch opts := options.GetConfig().(type) {
+	case *mgmtv1alpha1.JobDestinationOptions_PostgresOptions:
+		return &SqlJobDestinationOpts{
+			TruncateBeforeInsert: opts.PostgresOptions.GetTruncateTable().GetTruncateBeforeInsert(),
+			TruncateCascade:      opts.PostgresOptions.GetTruncateTable().GetCascade(),
+			InitSchema:           opts.PostgresOptions.GetInitTableSchema(),
+		}, nil
+	case *mgmtv1alpha1.JobDestinationOptions_MysqlOptions:
+		return &SqlJobDestinationOpts{
+			TruncateBeforeInsert: opts.MysqlOptions.GetTruncateTable().GetTruncateBeforeInsert(),
+			InitSchema:           opts.MysqlOptions.GetInitTableSchema(),
+		}, nil
+	case *mgmtv1alpha1.JobDestinationOptions_MssqlOptions:
+		return &SqlJobDestinationOpts{
+			TruncateBeforeInsert: opts.MssqlOptions.GetTruncateTable().GetTruncateBeforeInsert(),
+			InitSchema:           opts.MssqlOptions.GetInitTableSchema(),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported job destination options type: %T", opts)
+	}
 }

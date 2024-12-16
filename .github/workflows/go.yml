@@ -4,6 +4,7 @@ on:
       - cli/**.go
       - backend/**.go
       - worker/**.go
+      - internal/**.go
       - go.mod
       - go.sum
   push:
@@ -13,6 +14,7 @@ on:
       - cli/**.go
       - backend/**.go
       - worker/**.go
+      - internal/**.go
       - go.mod
       - go.sum
 
@@ -37,8 +39,24 @@ jobs:
           version: latest
           args: --timeout=10m
 
-  test:
-    name: test
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+  unit-test:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -52,13 +70,72 @@ jobs:
 
       - name: Test
         run: |
-          go vet ./...
-
-      - name: Test
-        run: |
-          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+          go test -race -coverprofile=unit-coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for requesting JWT for use with retrieving AWS creds
+      contents: read # required for actions/checkout
+    env:
+      AWS_REGION: "us-west-2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.INTEGRATION_TEST_AWS_ROLE_ARN }}
+          role-session-name: NeosyncCiIntegrationTests
+
+      - name: Run Integration Tests
+        run: |
+          go test -race -timeout 1800s -coverprofile=integration-coverage.out -covermode=atomic -run TestIntegrationTestSuite ./...
+        env:
+          INTEGRATION_TESTS_ENABLED: 1
+          S3_INTEGRATION_TESTS_ENABLED: 1
+          TEST_S3_REGION: ${{ env.AWS_REGION }}
+          TEST_S3_BUCKET: ${{ vars.INTEGRATION_TEST_BUCKET_NAME }}
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  go-mod-tidy-check:
+    name: go-mod-tidy-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run go mod tidy
+        run: go mod tidy
+
+      - name: Check for changes in go.mod and go.sum
+        run: |
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "Error: go.mod and/or go.sum have changes after running 'go mod tidy'"
+            echo "Please run 'go mod tidy' and commit the changes."
+            exit 1
+          fi

@@ -1,14 +1,17 @@
 'use client';
 import ButtonText from '@/components/ButtonText';
 import OverviewContainer from '@/components/containers/OverviewContainer';
+import EmptyState, { EmptyStateLinkButton } from '@/components/EmptyState';
 import PageHeader from '@/components/headers/PageHeader';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonTable from '@/components/skeleton/SkeletonTable';
 import { Button } from '@/components/ui/button';
-import { useGetConnections } from '@/libs/hooks/useGetConnections';
+import { useQuery } from '@connectrpc/connect-query';
+import { getConnections } from '@neosync/sdk/connectquery';
 import { PlusIcon } from '@radix-ui/react-icons';
 import NextLink from 'next/link';
 import { ReactElement, useMemo } from 'react';
+import { GoWorkflow } from 'react-icons/go';
 import { getColumns } from './components/ConnectionsTable/columns';
 import { DataTable } from './components/ConnectionsTable/data-table';
 
@@ -33,14 +36,18 @@ interface ConnectionTableProps {}
 function ConnectionTable(props: ConnectionTableProps): ReactElement {
   const {} = props;
   const { account } = useAccount();
-  const { isLoading, data, mutate } = useGetConnections(account?.id ?? '');
+  const { data, isLoading, refetch } = useQuery(
+    getConnections,
+    { accountId: account?.id ?? '' },
+    { enabled: !!account?.id }
+  );
 
   const columns = useMemo(
     () =>
       getColumns({
         accountName: account?.name ?? '',
         onConnectionDeleted() {
-          mutate();
+          refetch();
         },
       }),
     [account?.name ?? '']
@@ -54,7 +61,22 @@ function ConnectionTable(props: ConnectionTableProps): ReactElement {
 
   return (
     <div>
-      <DataTable columns={columns} data={connections} />
+      {connections.length == 0 ? (
+        <EmptyState
+          title="No Connections yet"
+          description="Get started by adding your first connection. Connections help you
+          integrate and sync data across your databases."
+          icon={<GoWorkflow className="w-8 h-8 text-primary" />}
+          extra={
+            <EmptyStateLinkButton
+              buttonText="Create your first Connection"
+              href={`/${account?.name}/new/connection`}
+            />
+          }
+        />
+      ) : (
+        <DataTable columns={columns} data={connections} />
+      )}
     </div>
   );
 }

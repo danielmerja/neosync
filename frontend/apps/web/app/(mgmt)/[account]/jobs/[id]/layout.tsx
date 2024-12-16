@@ -5,56 +5,67 @@ import ResourceId from '@/components/ResourceId';
 import { SubNav } from '@/components/SubNav';
 import OverviewContainer from '@/components/containers/OverviewContainer';
 import PageHeader from '@/components/headers/PageHeader';
+import { isJobSubsettable } from '@/components/jobs/subsets/utils';
 import { useAccount } from '@/components/providers/account-provider';
 import { LayoutProps } from '@/components/types';
 import { Alert, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { toast } from '@/components/ui/use-toast';
-import { useGetJob } from '@/libs/hooks/useGetJob';
-import { useGetJobRunsByJob } from '@/libs/hooks/useGetJobRunsByJob';
-import { useGetJobStatus } from '@/libs/hooks/useGetJobStatus';
 import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
 import { getErrorMessage } from '@/util/util';
-import { GetJobStatusResponse, Job, JobStatus } from '@neosync/sdk';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
+import { Job, JobSourceOptions, JobStatus } from '@neosync/sdk';
+import {
+  createJobRun,
+  deleteJob,
+  getJob,
+  getJobRecentRuns,
+  getJobRuns,
+  getJobStatus,
+} from '@neosync/sdk/connectquery';
 import { LightningBoltIcon, TrashIcon } from '@radix-ui/react-icons';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 import JobIdSkeletonForm from './JobIdSkeletonForm';
+import JobCloneButton from './components/JobCloneButton';
 import JobPauseButton from './components/JobPauseButton';
-import { isAiDataGenJob, isDataGenJob } from './util';
 
 export default function JobIdLayout({ children, params }: LayoutProps) {
   const id = params?.id ?? '';
   const router = useRouter();
   const { account } = useAccount();
-  const { data, isLoading } = useGetJob(account?.id ?? '', id);
-  const { data: jobStatus, mutate: mutateJobStatus } = useGetJobStatus(
-    account?.id ?? '',
-    id
+  const { data, isLoading } = useQuery(getJob, { id }, { enabled: !!id });
+  const { data: jobStatus, refetch: mutateJobStatus } = useQuery(
+    getJobStatus,
+    { jobId: id },
+    { enabled: !!id }
   );
-  const { mutate: mutateJobRunsByJob } = useGetJobRunsByJob(
-    account?.id ?? '',
-    id
+  const { refetch: mutateRecentRuns } = useQuery(
+    getJobRecentRuns,
+    { jobId: id },
+    { enabled: !!id }
   );
-
+  const { refetch: mutateJobRunsByJob } = useQuery(
+    getJobRuns,
+    { id: { case: 'jobId', value: id } },
+    { enabled: !!id }
+  );
   const { data: systemAppConfigData, isLoading: isSystemConfigLoading } =
     useGetSystemAppConfig();
+  const { mutateAsync: removeJob } = useMutation(deleteJob);
+  const { mutateAsync: triggerJobRun } = useMutation(createJobRun);
 
   async function onTriggerJobRun(): Promise<void> {
     try {
-      await triggerJobRun(account?.id ?? '', id);
-      toast({
-        title: 'Job run triggered successfully!',
-        variant: 'success',
-      });
+      await triggerJobRun({ jobId: id });
+      toast.success('Job run triggered successfully!');
       setTimeout(() => {
+        mutateRecentRuns();
         mutateJobRunsByJob();
-      }, 3000); // delay briefly as there can sometimes be a trigger delay in temporal
+      }, 4000); // delay briefly as there can sometimes be a trigger delay in temporal
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to trigger job run',
+      toast.error('Uanble to trigger job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -64,24 +75,19 @@ export default function JobIdLayout({ children, params }: LayoutProps) {
       return;
     }
     try {
-      await removeJob(account?.id ?? '', id);
-      toast({
-        title: 'Job removed successfully!',
-        variant: 'success',
-      });
+      await removeJob({ id });
+      toast.success('Job removed successfully!');
       router.push(`/${account?.name}/jobs`);
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove job',
+      toast.error('Unable to remove job', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
-  function onNewStatus(newStatus: JobStatus): void {
-    mutateJobStatus(new GetJobStatusResponse({ status: newStatus }));
+  function onNewStatus(_newStatus: JobStatus): void {
+    mutateJobStatus();
   }
 
   if (isLoading) {
@@ -102,18 +108,14 @@ export default function JobIdLayout({ children, params }: LayoutProps) {
     );
   }
 
-  let sidebarNavItems = getSidebarNavItems(account?.name ?? '', data?.job);
-  sidebarNavItems =
-    isSystemConfigLoading || !systemAppConfigData?.isMetricsServiceEnabled
-      ? sidebarNavItems.filter((item) => !item.href.endsWith('/usage'))
-      : sidebarNavItems;
+  const sidebarNavItems = getSidebarNavItems(
+    account?.name ?? '',
+    data?.job,
+    !isSystemConfigLoading && systemAppConfigData?.isMetricsServiceEnabled,
+    !isSystemConfigLoading && systemAppConfigData?.isJobHooksEnabled
+  );
 
-  let badgeValue = 'Sync Job';
-  if (data.job.source?.options?.config.case === 'generate') {
-    badgeValue = 'Generate Job';
-  } else if (data.job.source?.options?.config.case === 'aiGenerate') {
-    badgeValue = 'AI Generate Job';
-  }
+  const badgeValue = getBadgeText(data.job.source?.options);
 
   return (
     <div>
@@ -132,7 +134,8 @@ export default function JobIdLayout({ children, params }: LayoutProps) {
               }
               leftBadgeValue={badgeValue}
               extraHeading={
-                <div className="flex flex-row space-x-4">
+                <div className="md:flex grid grid-cols-2 md:flex-row gap-4">
+                  <JobCloneButton job={data.job} />
                   <DeleteConfirmationDialog
                     trigger={
                       <Button variant="destructive">
@@ -172,38 +175,35 @@ export default function JobIdLayout({ children, params }: LayoutProps) {
   );
 }
 
+function getBadgeText(
+  options?: JobSourceOptions
+): 'Sync Job' | 'Generate Job' | 'AI Generate Job' {
+  switch (options?.config.case) {
+    case 'generate':
+      return 'Generate Job';
+    case 'aiGenerate':
+      return 'AI Generate Job';
+    default:
+      return 'Sync Job';
+  }
+}
+
 interface SidebarNav {
   title: string;
   href: string;
 }
-function getSidebarNavItems(accountName: string, job?: Job): SidebarNav[] {
+function getSidebarNavItems(
+  accountName: string,
+  job?: Job,
+  isMetricsServiceEnabled?: boolean,
+  isJobHooksEnabled?: boolean
+): SidebarNav[] {
   if (!job) {
     return [{ title: 'Overview', href: `` }];
   }
   const basePath = `/${accountName}/jobs/${job.id}`;
 
-  if (isDataGenJob(job) || isAiDataGenJob(job)) {
-    return [
-      {
-        title: 'Overview',
-        href: `${basePath}`,
-      },
-      {
-        title: 'Source',
-        href: `${basePath}/source`,
-      },
-      {
-        title: 'Destination',
-        href: `${basePath}/destinations`,
-      },
-      {
-        title: 'Usage',
-        href: `${basePath}/usage`,
-      },
-    ];
-  }
-
-  return [
+  const nav = [
     {
       title: 'Overview',
       href: `${basePath}`,
@@ -216,39 +216,25 @@ function getSidebarNavItems(accountName: string, job?: Job): SidebarNav[] {
       title: 'Destinations',
       href: `${basePath}/destinations`,
     },
-    {
+  ];
+
+  if (isJobSubsettable(job)) {
+    nav.push({
       title: 'Subsets',
       href: `${basePath}/subsets`,
-    },
-    {
+    });
+  }
+
+  if (isMetricsServiceEnabled) {
+    nav.push({
       title: 'Usage',
       href: `${basePath}/usage`,
-    },
-  ];
-}
-
-async function removeJob(accountId: string, jobId: string): Promise<void> {
-  const res = await fetch(`/api/accounts/${accountId}/jobs/${jobId}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
+    });
   }
-  await res.json();
-}
 
-async function triggerJobRun(accountId: string, jobId: string): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/jobs/${jobId}/create-run`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ jobId }),
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
+  if (isJobHooksEnabled) {
+    nav.push({ title: 'Hooks', href: `${basePath}/hooks` });
   }
-  await res.json();
+
+  return nav;
 }

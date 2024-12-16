@@ -1,9 +1,13 @@
 'use client';
+import FormPersist from '@/app/(mgmt)/FormPersist';
 import { getConnectionType } from '@/app/(mgmt)/[account]/connections/util';
+import {
+  getDefaultDestinationFormValueOptionsFromConnectionCase,
+  getNewJobSessionKeys,
+} from '@/app/(mgmt)/[account]/jobs/util';
 import OverviewContainer from '@/components/containers/OverviewContainer';
 import PageHeader from '@/components/headers/PageHeader';
 import DestinationOptionsForm from '@/components/jobs/Form/DestinationOptionsForm';
-import SourceOptionsForm from '@/components/jobs/Form/SourceOptionsForm';
 import { useAccount } from '@/components/providers/account-provider';
 import { PageProps } from '@/components/types';
 import { Button } from '@/components/ui/button';
@@ -22,20 +26,21 @@ import {
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useGetConnections } from '@/libs/hooks/useGetConnections';
-import { splitConnections } from '@/libs/utils';
+import { getSingleOrUndefined, splitConnections } from '@/libs/utils';
+import { useQuery } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
 import { ConnectionConfig } from '@neosync/sdk';
+import { getConnections } from '@neosync/sdk/connectquery';
 import { useRouter } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect } from 'react';
 import { Control, useForm, useWatch } from 'react-hook-form';
-import useFormPersist from 'react-hook-form-persist';
 import { useSessionStorage } from 'usehooks-ts';
 import JobsProgressSteps, {
   getJobProgressSteps,
 } from '../../../JobsProgressSteps';
 import ConnectionSelectContent from '../../../connect/ConnectionSelectContent';
-import { SingleTableAiConnectFormValues } from '../../../schema';
+import { SingleTableAiConnectFormValues } from '../../../job-form-validations';
 
 const NEW_CONNECTION_VALUE = 'new-connection';
 
@@ -47,9 +52,10 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       router.push(`/${account?.name}/new/job`);
     }
   }, [searchParams?.sessionId]);
+  const posthog = usePostHog();
 
-  const sessionPrefix = searchParams?.sessionId ?? '';
-  const formKey = `${sessionPrefix}-new-job-single-table-ai-connect`;
+  const sessionPrefix = getSingleOrUndefined(searchParams?.sessionId) ?? '';
+  const formKey = getNewJobSessionKeys(sessionPrefix).aigenerate.connect;
   const [defaultValues] = useSessionStorage<SingleTableAiConnectFormValues>(
     formKey,
     {
@@ -69,19 +75,20 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     defaultValues,
   });
 
-  useFormPersist(formKey, {
-    watch: form.watch,
-    setValue: form.setValue,
-    storage: window.sessionStorage,
-  });
-  const { isLoading: isConnectionsLoading, data: connectionsData } =
-    useGetConnections(account?.id ?? '');
+  const { isLoading: isConnectionsLoading, data: connectionsData } = useQuery(
+    getConnections,
+    { accountId: account?.id },
+    { enabled: !!account?.id }
+  );
   const connections = connectionsData?.connections ?? [];
 
   function onSubmit(_values: SingleTableAiConnectFormValues) {
     router.push(
       `/${account?.name}/new/job/aigenerate/single/schema?sessionId=${sessionPrefix}`
     );
+    posthog.capture('New Job Flow Connect Complete', {
+      jobType: 'ai-generate',
+    });
   }
 
   const { mysql, postgres, openai } = splitConnections(connections);
@@ -96,6 +103,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       id="newjobflowcontainer"
       className="px-12 md:px-24 lg:px-32 flex flex-col gap-5"
     >
+      <FormPersist formKey={formKey} form={form} />
       <OverviewContainer
         Header={
           <PageHeader
@@ -149,7 +157,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                             if (value === NEW_CONNECTION_VALUE) {
                               const urlParams = new URLSearchParams({
                                 returnTo: `/${account?.name}/new/job/aigenerate/single/connect?sessionId=${sessionPrefix}&from=new-connection`,
-                                connectionType: 'openai',
+                                connectionType: 'openaiConfig',
                               });
                               router.push(
                                 `/${account?.name}/new/connection?${urlParams.toString()}`
@@ -177,12 +185,6 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                     </FormControl>
                     <FormMessage />
                   </FormItem>
-                )}
-              />
-
-              <SourceOptionsForm
-                connection={connections.find(
-                  (c) => c.id === form.getValues().sourceId
                 )}
               />
             </div>
@@ -239,8 +241,11 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                               if (
                                 urlParams.getAll('connectionType').length === 0
                               ) {
-                                urlParams.append('connectionType', 'postgres');
-                                urlParams.append('connectionType', 'mysql');
+                                urlParams.append('connectionType', 'pgConfig');
+                                urlParams.append(
+                                  'connectionType',
+                                  'mysqlConfig'
+                                );
                               }
                               router.push(
                                 `/${account?.name}/new/connection?${urlParams.toString()}`
@@ -253,6 +258,27 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                             );
                             if (!destId) {
                               form.setValue('destination.connectionId', value);
+                              const destConnection = connections.find(
+                                (c) => c.id === value
+                              );
+                              const destConnType = getConnectionType(
+                                destConnection?.connectionConfig ??
+                                  new ConnectionConfig()
+                              );
+                              const newOpts =
+                                getDefaultDestinationFormValueOptionsFromConnectionCase(
+                                  destConnType,
+                                  () => new Set()
+                                );
+                              form.setValue(
+                                'destination.destinationOptions',
+                                newOpts,
+                                {
+                                  shouldDirty: true,
+                                  shouldTouch: true,
+                                  shouldValidate: true,
+                                }
+                              );
                             }
                           }}
                           value={field.value}
@@ -326,8 +352,11 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                               if (
                                 urlParams.getAll('connectionType').length === 0
                               ) {
-                                urlParams.append('connectionType', 'postgres');
-                                urlParams.append('connectionType', 'mysql');
+                                urlParams.append('connectionType', 'pgConfig');
+                                urlParams.append(
+                                  'connectionType',
+                                  'mysqlConfig'
+                                );
                               }
                               router.push(
                                 `/${account?.name}/new/connection?${urlParams.toString()}`
@@ -335,12 +364,27 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                               return;
                             }
                             field.onChange(value);
-                            form.setValue('destination.destinationOptions', {
-                              initTableSchema: false,
-                              truncateBeforeInsert: false,
-                              truncateCascade: false,
-                              onConflictDoNothing: false,
-                            });
+                            const destConnection = connections.find(
+                              (c) => c.id === value
+                            );
+                            const destConnType = getConnectionType(
+                              destConnection?.connectionConfig ??
+                                new ConnectionConfig()
+                            );
+                            const newOpts =
+                              getDefaultDestinationFormValueOptionsFromConnectionCase(
+                                destConnType,
+                                () => new Set()
+                              );
+                            form.setValue(
+                              'destination.destinationOptions',
+                              newOpts,
+                              {
+                                shouldDirty: true,
+                                shouldTouch: true,
+                                shouldValidate: true,
+                              }
+                            );
                           }}
                           value={field.value}
                         >
@@ -367,28 +411,17 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                   (c) => c.id === form.getValues().destination.connectionId
                 )}
                 hideInitTableSchema={shouldHideInitTableSchema}
-                value={{
-                  initTableSchema: destOpts.initTableSchema ?? false,
-                  onConflictDoNothing: destOpts.onConflictDoNothing ?? false,
-                  truncateBeforeInsert: destOpts.truncateBeforeInsert ?? false,
-                  truncateCascade: destOpts.truncateCascade ?? false,
-                }}
+                value={destOpts}
                 setValue={(newOpts) => {
-                  form.setValue(
-                    'destination.destinationOptions',
-                    {
-                      initTableSchema: newOpts.initTableSchema,
-                      onConflictDoNothing: newOpts.onConflictDoNothing,
-                      truncateBeforeInsert: newOpts.truncateBeforeInsert,
-                      truncateCascade: newOpts.truncateCascade,
-                    },
-                    {
-                      shouldDirty: true,
-                      shouldTouch: true,
-                      shouldValidate: true,
-                    }
-                  );
+                  form.setValue('destination.destinationOptions', newOpts, {
+                    shouldDirty: true,
+                    shouldTouch: true,
+                    shouldValidate: true,
+                  });
                 }}
+                hideDynamoDbTableMappings={true}
+                destinationDetailsRecord={{}} // not used because we are hiding dynamodb table mappings
+                errors={form.formState.errors?.destination?.destinationOptions}
               />
             </div>
           </div>

@@ -1,10 +1,8 @@
 'use client';
 import ButtonText from '@/components/ButtonText';
-import FormError from '@/components/FormError';
 import { PasswordInput } from '@/components/PasswordComponent';
 import Spinner from '@/components/Spinner';
 import RequiredLabel from '@/components/labels/RequiredLabel';
-import { setOnboardingConfig } from '@/components/onboarding-checklist/OnboardingChecklist';
 import PermissionsDialog from '@/components/permissions/PermissionsDialog';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonForm from '@/components/skeleton/SkeletonForm';
@@ -36,36 +34,28 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
-import { toast } from '@/components/ui/use-toast';
-import { useGetAccountOnboardingConfig } from '@/libs/hooks/useGetAccountOnboardingConfig';
-import { getConnection } from '@/libs/hooks/useGetConnection';
 import { getErrorMessage } from '@/util/util';
 import {
-  POSTGRES_FORM_SCHEMA,
+  PostgresCreateConnectionFormContext,
   PostgresFormValues,
   SSL_MODES,
 } from '@/yup-validations/connections';
+import { useMutation } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
+import { CheckConnectionConfigResponse } from '@neosync/sdk';
 import {
-  CheckConnectionConfigResponse,
-  ClientTlsConfig,
-  ConnectionConfig,
-  CreateConnectionRequest,
-  CreateConnectionResponse,
-  GetAccountOnboardingConfigResponse,
-  IsConnectionNameAvailableResponse,
-  PostgresConnection,
-  PostgresConnectionConfig,
-  SSHAuthentication,
-  SSHPassphrase,
-  SSHPrivateKey,
-  SSHTunnel,
-  SqlConnectionOptions,
-} from '@neosync/sdk';
+  checkConnectionConfig,
+  createConnection,
+  getConnection,
+  isConnectionNameAvailable,
+} from '@neosync/sdk/connectquery';
 import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect, useState } from 'react';
-import { Controller, useForm } from 'react-hook-form';
+import { useForm } from 'react-hook-form';
+import { toast } from 'sonner';
+import { buildConnectionConfigPostgres } from '../../../connections/util';
 
 type ActiveTab = 'host' | 'url';
 
@@ -74,45 +64,62 @@ export default function PostgresForm() {
   const { account } = useAccount();
   const sourceConnId = searchParams.get('sourceId');
   const [isLoading, setIsLoading] = useState<boolean>();
-  const { data: onboardingData, mutate } = useGetAccountOnboardingConfig(
-    account?.id ?? ''
+  const { mutateAsync: isConnectionNameAvailableAsync } = useMutation(
+    isConnectionNameAvailable
   );
+
   // used to know which tab - host or url that the user is on when we submit the form
   const [activeTab, setActiveTab] = useState<ActiveTab>('url');
 
-  const form = useForm<PostgresFormValues>({
-    resolver: yupResolver(POSTGRES_FORM_SCHEMA),
-    mode: 'onChange',
-    defaultValues: {
-      connectionName: '',
-      db: {
-        host: 'localhost',
-        name: 'postgres',
-        user: 'postgres',
-        pass: 'postgres',
-        port: 5432,
-        sslMode: 'disable',
+  const form = useForm<PostgresFormValues, PostgresCreateConnectionFormContext>(
+    {
+      resolver: yupResolver(PostgresFormValues),
+      mode: 'onChange',
+      defaultValues: {
+        connectionName: '',
+        db: {
+          host: 'localhost',
+          name: 'postgres',
+          user: 'postgres',
+          pass: 'postgres',
+          port: 5432,
+          sslMode: 'disable',
+        },
+        url: '',
+        options: {
+          maxConnectionLimit: 50,
+          maxIdleDuration: '',
+          maxIdleLimit: 2,
+          maxOpenDuration: '',
+        },
+        tunnel: {
+          host: '',
+          port: 22,
+          knownHostPublicKey: '',
+          user: '',
+          passphrase: '',
+          privateKey: '',
+        },
+        clientTls: {
+          rootCert: '',
+          clientCert: '',
+          clientKey: '',
+          serverName: '',
+        },
       },
-      url: '',
-      options: {
-        maxConnectionLimit: 80,
+      context: {
+        accountId: account?.id ?? '',
+        activeTab: activeTab,
+        isConnectionNameAvailable: isConnectionNameAvailableAsync,
       },
-      tunnel: {
-        host: '',
-        port: 22,
-        knownHostPublicKey: '',
-        user: '',
-        passphrase: '',
-        privateKey: '',
-      },
-      clientTls: {
-        rootCert: '',
-        clientCert: '',
-        clientKey: '',
-      },
-    },
-    context: { accountId: account?.id ?? '', activeTab: activeTab },
-  });
+    }
+  );
+  const { mutateAsync: createPostgresConnection } =
+    useMutation(createConnection);
+  const { mutateAsync: checkPostgresConnection } = useMutation(
+    checkConnectionConfig
+  );
+  const { mutateAsync: getPostgresConnection } = useMutation(getConnection);
 
   const router = useRouter();
   const [validationResponse, setValidationResponse] = useState<
@@ -122,6 +129,7 @@ export default function PostgresForm() {
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [openPermissionDialog, setOpenPermissionDialog] =
     useState<boolean>(false);
+  const posthog = usePostHog();
 
   async function onSubmit(values: PostgresFormValues) {
     if (!account) {
@@ -129,80 +137,17 @@ export default function PostgresForm() {
     }
 
     try {
-      let connection: CreateConnectionResponse = new CreateConnectionResponse(
-        {}
-      );
-      if (activeTab === 'host') {
-        connection = await createPostgresConnection(
-          values.connectionName,
-          account.id,
-          values.db,
-          undefined, // don't pass in the url since user is submitting the db values
-          values.tunnel,
-          values.options,
-          values.clientTls
-        );
-      } else if (activeTab === 'url') {
-        connection = await createPostgresConnection(
-          values.connectionName,
-          account.id,
-          undefined, // don't pass in the db values since user is submitting the url
-          values.url ?? '',
-          values.tunnel,
-          values.options,
-          values.clientTls
-        );
-      }
-
-      toast({
-        title: 'Successfully created connection!',
-        variant: 'success',
+      const connection = await createPostgresConnection({
+        name: values.connectionName,
+        accountId: account.id,
+        connectionConfig: buildConnectionConfigPostgres({
+          ...values,
+          url: activeTab === 'url' ? values.url : undefined,
+          db: values.db,
+        }),
       });
-
-      // updates the onboarding data
-      if (onboardingData?.config?.hasCreatedSourceConnection) {
-        try {
-          const resp = await setOnboardingConfig(account.id, {
-            hasCreatedSourceConnection:
-              onboardingData.config.hasCreatedSourceConnection,
-            hasCreatedDestinationConnection: true,
-            hasCreatedJob: onboardingData.config.hasCreatedJob,
-            hasInvitedMembers: onboardingData.config.hasInvitedMembers,
-          });
-          mutate(
-            new GetAccountOnboardingConfigResponse({
-              config: resp.config,
-            })
-          );
-        } catch (e) {
-          toast({
-            title: 'Unable to update onboarding status!',
-            variant: 'destructive',
-          });
-        }
-      } else {
-        try {
-          const resp = await setOnboardingConfig(account.id, {
-            hasCreatedSourceConnection: true,
-            hasCreatedDestinationConnection:
-              onboardingData?.config?.hasCreatedSourceConnection ?? true,
-            hasCreatedJob: onboardingData?.config?.hasCreatedJob ?? true,
-            hasInvitedMembers:
-              onboardingData?.config?.hasInvitedMembers ?? true,
-          });
-          mutate(
-            new GetAccountOnboardingConfigResponse({
-              config: resp.config,
-            })
-          );
-        } catch (e) {
-          toast({
-            title: 'Unable to update onboarding status!',
-            variant: 'destructive',
-          });
-        }
-      }
-
+      posthog.capture('New Connection Created', { type: 'postgres' });
+      toast.success('Successfully created connection!');
       const returnTo = searchParams.get('returnTo');
       if (returnTo) {
         router.push(returnTo);
@@ -215,10 +160,8 @@ export default function PostgresForm() {
       }
     } catch (err) {
       console.error('Error in form submission:', err);
-      toast({
-        title: 'Unable to create connection',
+      toast.error('Unable to create connection!', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -233,7 +176,7 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
       }
       setIsLoading(true);
       try {
-        const connData = await getConnection(account.id, sourceConnId);
+        const connData = await getPostgresConnection({ id: sourceConnId });
         if (connData.connection?.connectionConfig?.config.case !== 'pgConfig') {
           return;
         }
@@ -258,8 +201,6 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
           dbConfig.sslMode = pgConfig?.sslMode ?? 'disable';
         }
 
-        /* reset the form with the new values and include the fallback values because of our validation schema requires a string and not undefined which is okay because it will tell the user that something is wrong instead of the user not realizing that it's undefined
-         */
         let passPhrase = '';
         let privateKey = '';
 
@@ -274,6 +215,8 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
             break;
         }
 
+        /* reset the form with the new values and include the fallback values because of our validation schema requires a string and not undefined which is okay because it will tell the user that something is wrong instead of the user not realizing that it's undefined
+         */
         form.reset({
           ...form.getValues(),
           connectionName: connData.connection?.name + '-copy',
@@ -281,7 +224,10 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
           url: typeof pgConfig === 'string' ? pgConfig : '',
           options: {
             maxConnectionLimit:
-              config.connectionOptions?.maxConnectionLimit ?? 80,
+              config.connectionOptions?.maxConnectionLimit ?? 50,
+            maxIdleDuration: config.connectionOptions?.maxIdleDuration ?? '',
+            maxIdleLimit: config.connectionOptions?.maxIdleConnections ?? 2,
+            maxOpenDuration: config.connectionOptions?.maxOpenDuration ?? '',
           },
           tunnel: {
             host: config.tunnel?.host ?? '',
@@ -291,6 +237,12 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
             passphrase: passPhrase,
             privateKey: privateKey,
           },
+          clientTls: {
+            clientCert: config.clientTls?.clientCert ?? '',
+            clientKey: config.clientTls?.clientKey ?? '',
+            rootCert: config.clientTls?.rootCert ?? '',
+            serverName: config.clientTls?.serverName ?? '',
+          },
         });
         if (config.connectionConfig.case === 'url') {
           setActiveTab('url');
@@ -299,10 +251,8 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
         }
       } catch (error) {
         console.error('Failed to fetch connection data:', error);
-        toast({
-          title: 'Unable to retrieve connection data for clone!',
+        toast.error('Unable to retrieve connection data for clone!', {
           description: getErrorMessage(error),
-          variant: 'destructive',
         });
       } finally {
         setIsLoading(false);
@@ -318,8 +268,8 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
-        <Controller
+      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <FormField
           control={form.control}
           name="connectionName"
           render={({ field: { onChange, ...field } }) => (
@@ -341,11 +291,6 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
                   }}
                 />
               </FormControl>
-              <FormError
-                errorMessage={
-                  form.formState.errors.connectionName?.message ?? ''
-                }
-              />
               <FormMessage />
             </FormItem>
           )}
@@ -525,34 +470,132 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
             />
           </>
         )}
-        <FormField
-          control={form.control}
-          name="options.maxConnectionLimit"
-          render={({ field }) => (
-            <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
-              <div className="space-y-0.5">
-                <FormLabel>Max Connection Limit</FormLabel>
-                <FormDescription>
-                  The maximum number of concurrent database connections allowed.
-                  If set to 0 then there is no limit on the number of open
-                  connections.
-                </FormDescription>
-              </div>
-              <FormControl>
-                <Input
-                  {...field}
-                  className="max-w-[180px]"
-                  type="number"
-                  value={field.value ? field.value.toString() : 80}
-                  onChange={(event) => {
-                    field.onChange(event.target.valueAsNumber);
-                  }}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        <div className="flex flex-col gap-0">
+          <FormField
+            control={form.control}
+            name="options.maxConnectionLimit"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                  <div className="space-y-0.5">
+                    <FormLabel>Max Open Connection Limit</FormLabel>
+                    <FormDescription>
+                      The maximum number of concurrent database connections
+                      allowed. If set to 0 then there is no limit on the number
+                      of open connections. -1 to leave unset and use system
+                      default.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="max-w-[180px]"
+                      type="number"
+                      value={
+                        field.value != null ? field.value.toString() : '-1'
+                      }
+                      onChange={(event) => {
+                        field.onChange(event.target.valueAsNumber);
+                      }}
+                    />
+                  </FormControl>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="options.maxOpenDuration"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                  <div className="space-y-0.5">
+                    <FormLabel>Max Open Duration</FormLabel>
+                    <FormDescription>
+                      The maximum amount of time a connection may be reused.
+                      Expired connections may be closed laizly before reuse. Ex:
+                      1s, 1m, 500ms. Empty to leave unset.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="max-w-[180px]"
+                      value={field.value ? field.value : ''}
+                      onChange={(event) => {
+                        field.onChange(event.target.value);
+                      }}
+                    />
+                  </FormControl>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="options.maxIdleLimit"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                  <div className="space-y-0.5">
+                    <FormLabel>Max Idle Connection Limit</FormLabel>
+                    <FormDescription>
+                      The maximum number of idle database connections allowed.
+                      If set to 0 then there is no limit on the number of idle
+                      connections. -1 to leave unset and use system default.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="max-w-[180px]"
+                      type="number"
+                      value={
+                        field.value != null ? field.value.toString() : '-1'
+                      }
+                      onChange={(event) => {
+                        field.onChange(event.target.valueAsNumber);
+                      }}
+                    />
+                  </FormControl>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="options.maxIdleDuration"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                  <div className="space-y-0.5">
+                    <FormLabel>Max Idle Duration</FormLabel>
+                    <FormDescription>
+                      The maximum amount of time a connection may be idle.
+                      Expired connections may be closed laizly before reuse. Ex:
+                      1s, 1m, 500ms. Empty to leave unset.
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="max-w-[180px]"
+                      value={field.value ? field.value : ''}
+                      onChange={(event) => {
+                        field.onChange(event.target.value);
+                      }}
+                    />
+                  </FormControl>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
         <Accordion type="single" collapsible className="w-full">
           <AccordionItem value="bastion">
             <AccordionTrigger>Client TLS Certificates</AccordionTrigger>
@@ -607,6 +650,26 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
                     <FormLabel>Client Key</FormLabel>
                     <FormDescription>
                       A private key corresponding to the client certificate.
+                    </FormDescription>
+                    <FormControl>
+                      <Textarea {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="clientTls.serverName"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Server Name</FormLabel>
+                    <FormDescription>
+                      {`Server Name is used to verify the hostname on the returned
+                      certificates. It is also included in the client's
+                      handshake to support virtual hosting unless it is an IP
+                      address. This is only required if performing full tls
+                      verification.`}
                     </FormDescription>
                     <FormControl>
                       <Textarea {...field} />
@@ -753,6 +816,7 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
           setOpenPermissionDialog={setOpenPermissionDialog}
           isValidating={isValidating}
           connectionName={form.getValues('connectionName')}
+          connectionType="postgres"
         />
         <div className="flex flex-row gap-3 justify-between">
           <Button
@@ -760,25 +824,14 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
             onClick={async () => {
               setIsValidating(true);
               try {
-                let res: CheckConnectionConfigResponse =
-                  new CheckConnectionConfigResponse({});
-                if (activeTab === 'host') {
-                  res = await checkPostgresConnection(
-                    account?.id ?? '',
-                    form.getValues().db,
-                    form.getValues().tunnel,
-                    undefined,
-                    form.getValues().clientTls
-                  );
-                } else if (activeTab === 'url') {
-                  res = await checkPostgresConnection(
-                    account?.id ?? '',
-                    undefined,
-                    form.getValues().tunnel,
-                    form.getValues().url ?? '',
-                    form.getValues().clientTls
-                  );
-                }
+                const values = form.getValues();
+                const res = await checkPostgresConnection({
+                  connectionConfig: buildConnectionConfigPostgres({
+                    ...values,
+                    url: activeTab === 'url' ? values.url : undefined,
+                    db: values.db,
+                  }),
+                });
                 setValidationResponse(res);
                 setOpenPermissionDialog(!!res?.isConnected);
               } catch (err) {
@@ -840,152 +893,4 @@ function ErrorAlert(props: ErrorAlertProps): ReactElement {
       <AlertDescription>{description}</AlertDescription>
     </Alert>
   );
-}
-async function createPostgresConnection(
-  name: string,
-  accountId: string,
-  db?: PostgresFormValues['db'],
-  url?: string,
-  tunnel?: PostgresFormValues['tunnel'],
-  options?: PostgresFormValues['options'],
-  clientTls?: PostgresFormValues['clientTls']
-): Promise<CreateConnectionResponse> {
-  const pgconfig = new PostgresConnectionConfig({});
-
-  if (url) {
-    pgconfig.connectionConfig = {
-      case: 'url',
-      value: url,
-    };
-  } else {
-    pgconfig.connectionConfig = {
-      case: 'connection',
-      value: new PostgresConnection({
-        host: db?.host,
-        name: db?.name,
-        user: db?.user,
-        pass: db?.pass,
-        port: db?.port,
-        sslMode: db?.sslMode,
-      }),
-    };
-  }
-
-  if (options && options.maxConnectionLimit != 0) {
-    pgconfig.connectionOptions = new SqlConnectionOptions({
-      maxConnectionLimit: options.maxConnectionLimit,
-    });
-  }
-
-  if (clientTls?.rootCert || clientTls?.clientCert || clientTls?.clientKey) {
-    pgconfig.clientTls = new ClientTlsConfig({
-      rootCert: clientTls.rootCert ? clientTls.rootCert : undefined,
-      clientCert: clientTls.clientCert ? clientTls.clientCert : undefined,
-      clientKey: clientTls.clientKey ? clientTls.clientKey : undefined,
-    });
-  }
-
-  if (tunnel && tunnel.host) {
-    pgconfig.tunnel = new SSHTunnel({
-      host: tunnel.host,
-      port: tunnel.port,
-      user: tunnel.user,
-      knownHostPublicKey: tunnel.knownHostPublicKey
-        ? tunnel.knownHostPublicKey
-        : undefined,
-    });
-    if (tunnel.privateKey) {
-      pgconfig.tunnel.authentication = new SSHAuthentication({
-        authConfig: {
-          case: 'privateKey',
-          value: new SSHPrivateKey({
-            value: tunnel.privateKey,
-            passphrase: tunnel.passphrase,
-          }),
-        },
-      });
-    } else if (tunnel.passphrase) {
-      pgconfig.tunnel.authentication = new SSHAuthentication({
-        authConfig: {
-          case: 'passphrase',
-          value: new SSHPassphrase({
-            value: tunnel.passphrase,
-          }),
-        },
-      });
-    }
-  }
-  const res = await fetch(`/api/accounts/${accountId}/connections`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(
-      new CreateConnectionRequest({
-        accountId,
-        name: name,
-        connectionConfig: new ConnectionConfig({
-          config: {
-            case: 'pgConfig',
-            value: pgconfig,
-          },
-        }),
-      })
-    ),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateConnectionResponse.fromJson(await res.json());
-}
-
-async function checkPostgresConnection(
-  accountId: string,
-  db?: PostgresFormValues['db'],
-  tunnel?: PostgresFormValues['tunnel'],
-  url?: string,
-  clientTls?: PostgresFormValues['clientTls']
-): Promise<CheckConnectionConfigResponse> {
-  let requestBody;
-  if (url) {
-    requestBody = { url, tunnel, clientTls };
-  } else {
-    requestBody = { db, tunnel, clientTls };
-  }
-  const res = await fetch(
-    `/api/accounts/${accountId}/connections/postgres/check`,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CheckConnectionConfigResponse.fromJson(await res.json());
-}
-
-export async function isConnectionNameAvailable(
-  name: string,
-  accountId: string
-): Promise<IsConnectionNameAvailableResponse> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/connections/is-connection-name-available?connectionName=${name}`,
-    {
-      method: 'GET',
-      headers: {
-        'content-type': 'application/json',
-      },
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return IsConnectionNameAvailableResponse.fromJson(await res.json());
 }

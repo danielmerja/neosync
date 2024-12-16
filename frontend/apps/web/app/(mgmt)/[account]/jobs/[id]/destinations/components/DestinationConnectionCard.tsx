@@ -1,6 +1,8 @@
 'use client';
+import ConnectionSelectContent from '@/app/(mgmt)/[account]/new/job/connect/ConnectionSelectContent';
+import ButtonText from '@/components/ButtonText';
+import DeleteConfirmationDialog from '@/components/DeleteConfirmationDialog';
 import DestinationOptionsForm from '@/components/jobs/Form/DestinationOptionsForm';
-import { useAccount } from '@/components/providers/account-provider';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import {
@@ -14,30 +16,31 @@ import {
 import {
   Select,
   SelectContent,
-  SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useToast } from '@/components/ui/use-toast';
+import { splitConnections } from '@/libs/utils';
 import { getErrorMessage } from '@/util/util';
-import {
-  DESTINATION_FORM_SCHEMA,
-  toJobDestinationOptions,
-} from '@/yup-validations/jobs';
+import { NewDestinationFormValues } from '@/yup-validations/jobs';
+import { useMutation } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
 import {
   Connection,
   JobDestination,
   JobDestinationOptions,
-  UpdateJobDestinationConnectionRequest,
-  UpdateJobDestinationConnectionResponse,
 } from '@neosync/sdk';
+import {
+  deleteJobDestinationConnection,
+  updateJobDestinationConnection,
+} from '@neosync/sdk/connectquery';
+import { TrashIcon } from '@radix-ui/react-icons';
 import { ReactElement } from 'react';
 import { Control, useForm, useWatch } from 'react-hook-form';
-import * as Yup from 'yup';
-
-const FORM_SCHEMA = DESTINATION_FORM_SCHEMA;
-type FormValues = Yup.InferType<typeof FORM_SCHEMA>;
+import { toast } from 'sonner';
+import {
+  getDestinationFormValuesOrDefaultFromDestination,
+  toJobDestinationOptions,
+} from '../../../util';
 
 interface Props {
   jobId: string;
@@ -58,53 +61,50 @@ export default function DestinationConnectionCard({
   isDeleteDisabled,
   jobSourceId,
 }: Props): ReactElement {
-  const { toast } = useToast();
-  const { account } = useAccount();
+  const { mutateAsync: setJobDestConnection } = useMutation(
+    updateJobDestinationConnection
+  );
+  const { mutateAsync: removeJobDestConnection } = useMutation(
+    deleteJobDestinationConnection
+  );
 
   const form = useForm({
-    resolver: yupResolver<FormValues>(FORM_SCHEMA),
-    values: getDefaultValues(destination),
+    resolver: yupResolver<NewDestinationFormValues>(NewDestinationFormValues),
+    values: getDestinationFormValuesOrDefaultFromDestination(destination),
   });
 
-  async function onSubmit(values: FormValues) {
+  async function onSubmit(values: NewDestinationFormValues) {
     try {
       const connection = connections.find((c) => c.id === values.connectionId);
-      await setJobConnection(
-        account?.id ?? '',
+      await setJobDestConnection({
         jobId,
-        values,
-        destination.id,
-        connection
-      );
-      mutate();
-      toast({
-        title: 'Successfully updated job destination!',
-        variant: 'success',
+        connectionId: values.connectionId,
+        destinationId: destination.id,
+        options: new JobDestinationOptions(
+          toJobDestinationOptions(values, connection)
+        ),
       });
+      mutate();
+      toast.success('Successfully updated job destination!');
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to update job destination',
+      toast.error('Unable to update job destination', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   async function onDelete() {
     try {
-      await deleteJobConnection(account?.id ?? '', jobId, destination.id);
-      mutate();
-      toast({
-        title: 'Successfully deleted job destination!',
-        variant: 'success',
+      await removeJobDestConnection({
+        destinationId: destination.id,
       });
+      mutate();
+      toast.success('Successfully deleted job destination!');
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to delete job destination',
+      toast.error('Unable to delete job destination', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -117,6 +117,9 @@ export default function DestinationConnectionCard({
     form.control,
     jobSourceId
   );
+
+  const { postgres, mysql, s3, mongodb, gcpcs, dynamodb, mssql } =
+    splitConnections(availableConnections);
   return (
     <Card>
       <Form {...form}>
@@ -134,12 +137,7 @@ export default function DestinationConnectionCard({
                           field.onChange(value);
                           form.setValue(
                             `destinationOptions`,
-                            {
-                              truncateBeforeInsert: false,
-                              truncateCascade: false,
-                              initTableSchema: false,
-                              onConflictDoNothing: false,
-                            },
+                            {},
                             {
                               shouldDirty: true,
                               shouldTouch: true,
@@ -150,18 +148,21 @@ export default function DestinationConnectionCard({
                         value={field.value}
                       >
                         <SelectTrigger>
-                          <SelectValue placeholder={dest?.name} />
+                          <SelectValue
+                            ref={field.ref}
+                            placeholder={dest?.name}
+                          />
                         </SelectTrigger>
                         <SelectContent>
-                          {availableConnections.map((connection) => (
-                            <SelectItem
-                              className="cursor-pointer"
-                              key={connection.id}
-                              value={connection.id}
-                            >
-                              {connection.name}
-                            </SelectItem>
-                          ))}
+                          <ConnectionSelectContent
+                            postgres={postgres}
+                            mysql={mysql}
+                            s3={s3}
+                            mongodb={mongodb}
+                            gcpcs={gcpcs}
+                            dynamodb={dynamodb}
+                            mssql={mssql}
+                          />
                         </SelectContent>
                       </Select>
                     </FormControl>
@@ -176,42 +177,24 @@ export default function DestinationConnectionCard({
                 connection={connections.find(
                   (c) => c.id === form.getValues().connectionId
                 )}
-                value={{
-                  initTableSchema: destOpts.initTableSchema ?? false,
-                  onConflictDoNothing: destOpts.onConflictDoNothing ?? false,
-                  truncateBeforeInsert: destOpts.truncateBeforeInsert ?? false,
-                  truncateCascade: destOpts.truncateCascade ?? false,
-                }}
+                value={destOpts}
                 setValue={(newOpts) => {
-                  form.setValue(
-                    'destinationOptions',
-                    {
-                      initTableSchema: newOpts.initTableSchema,
-                      onConflictDoNothing: newOpts.onConflictDoNothing,
-                      truncateBeforeInsert: newOpts.truncateBeforeInsert,
-                      truncateCascade: newOpts.truncateCascade,
-                    },
-                    {
-                      shouldDirty: true,
-                      shouldTouch: true,
-                      shouldValidate: true,
-                    }
-                  );
+                  form.setValue('destinationOptions', newOpts, {
+                    shouldDirty: true,
+                    shouldTouch: true,
+                    shouldValidate: true,
+                  });
                 }}
                 hideInitTableSchema={shouldHideInitTableSchema}
+                hideDynamoDbTableMappings={true}
+                destinationDetailsRecord={{}} // not used because we are hiding dynamodb table mappings
+                errors={form.formState.errors?.destinationOptions}
               />
             </div>
           </CardContent>
           <CardFooter>
             <div className="flex flex-row items-center justify-between w-full mt-4">
-              <Button
-                type="button"
-                variant="destructive"
-                onClick={onDelete}
-                disabled={isDeleteDisabled}
-              >
-                Delete
-              </Button>
+              <DeleteButton isDisabled={isDeleteDisabled} onDelete={onDelete} />
               <Button disabled={!form.formState.isDirty} type="submit">
                 Save
               </Button>
@@ -223,90 +206,29 @@ export default function DestinationConnectionCard({
   );
 }
 
-async function deleteJobConnection(
-  accountId: string,
-  jobId: string,
-  destinationId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/jobs/${jobId}/destination-connection/${destinationId}`,
-    {
-      method: 'DELETE',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
+interface DeleteButtonProps {
+  isDisabled?: boolean;
+  onDelete(): Promise<void> | void;
 }
 
-async function setJobConnection(
-  accountId: string,
-  jobId: string,
-  values: FormValues,
-  destinationId: string,
-  connection?: Connection
-): Promise<UpdateJobDestinationConnectionResponse> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/jobs/${jobId}/destination-connection`,
-    {
-      method: 'PUT',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(
-        new UpdateJobDestinationConnectionRequest({
-          jobId: jobId,
-          connectionId: values.connectionId,
-          destinationId: destinationId,
-          options: new JobDestinationOptions(
-            toJobDestinationOptions(values, connection)
-          ),
-        })
-      ),
-    }
+function DeleteButton(props: DeleteButtonProps): ReactElement {
+  const { isDisabled, onDelete } = props;
+  return (
+    <DeleteConfirmationDialog
+      trigger={
+        <Button type="button" variant="destructive" disabled={isDisabled}>
+          <ButtonText leftIcon={<TrashIcon />} text="Delete" />
+        </Button>
+      }
+      headerText="Are you sure you want to delete this destination connection?"
+      description="Deleting this is irreversable and will cause data to stop syncing to this destination!"
+      onConfirm={async () => onDelete()}
+    />
   );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return UpdateJobDestinationConnectionResponse.fromJson(await res.json());
-}
-
-function getDefaultValues(d: JobDestination): FormValues {
-  switch (d.options?.config.case) {
-    case 'postgresOptions':
-      return {
-        connectionId: d.connectionId,
-        destinationOptions: {
-          truncateBeforeInsert:
-            d.options.config.value.truncateTable?.truncateBeforeInsert,
-          truncateCascade: d.options.config.value.truncateTable?.cascade,
-          initTableSchema: d.options.config.value.initTableSchema,
-          onConflictDoNothing: d.options.config.value.onConflict?.doNothing,
-        },
-      };
-    case 'mysqlOptions':
-      return {
-        connectionId: d.connectionId,
-        destinationOptions: {
-          truncateBeforeInsert:
-            d.options.config.value.truncateTable?.truncateBeforeInsert,
-          initTableSchema: d.options.config.value.initTableSchema,
-          onConflictDoNothing: d.options.config.value.onConflict?.doNothing,
-        },
-      };
-    default:
-      return {
-        connectionId: d.connectionId,
-        destinationOptions: {},
-      };
-  }
 }
 
 function useShouldHideInitConnectionSchema(
-  control: Control<FormValues>,
+  control: Control<NewDestinationFormValues>,
   sourceId: string
 ): boolean {
   const [destinationConnectionid] = useWatch({

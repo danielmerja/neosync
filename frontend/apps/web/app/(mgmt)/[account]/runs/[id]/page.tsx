@@ -13,21 +13,43 @@ import { Alert, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useToast } from '@/components/ui/use-toast';
-import { refreshWhenJobRunning, useGetJobRun } from '@/libs/hooks/useGetJobRun';
 import { JobRunStatus as JobRunStatusEnum } from '@neosync/sdk';
 import { TiCancel } from 'react-icons/ti';
 
+import { CopyButton } from '@/components/CopyButton';
 import ResourceId from '@/components/ResourceId';
 import {
-  refreshEventsWhenEventsIncomplete,
-  useGetJobRunEvents,
-} from '@/libs/hooks/useGetJobRunEvents';
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
+import {
+  refreshEventsWhenEventsIncomplete,
+  refreshJobRunWhenJobRunning,
+} from '@/libs/utils';
 import { formatDateTime, getErrorMessage } from '@/util/util';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
+import { Editor } from '@monaco-editor/react';
+import {
+  cancelJobRun,
+  deleteJobRun,
+  getJobRun,
+  getJobRunEvents,
+  getRunContext,
+  terminateJobRun,
+} from '@neosync/sdk/connectquery';
 import { ArrowRightIcon, Cross2Icon, TrashIcon } from '@radix-ui/react-icons';
+import { formatDuration, intervalToDuration } from 'date-fns';
+import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { ReactElement } from 'react';
+import { ReactElement, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
+import { format as formatSql } from 'sql-formatter';
+import yaml from 'yaml';
 import JobRunStatus from '../components/JobRunStatus';
 import JobRunActivityTable from './components/JobRunActivityTable';
 import JobRunLogs from './components/JobRunLogs';
@@ -35,76 +57,163 @@ import JobRunLogs from './components/JobRunLogs';
 export default function Page({ params }: PageProps): ReactElement {
   const { account } = useAccount();
   const accountId = account?.id || '';
-  const id = params?.id ?? '';
+  const id = decodeURIComponent(params?.id ?? '');
   const router = useRouter();
-  const { toast } = useToast();
   const { data: systemAppConfigData, isLoading: isSystemAppConfigDataLoading } =
     useGetSystemAppConfig();
-  const { data, isLoading, mutate } = useGetJobRun(id, accountId, {
-    refreshIntervalFn: refreshWhenJobRunning,
-  });
+  const {
+    data,
+    isLoading,
+    refetch: mutate,
+  } = useQuery(
+    getJobRun,
+    { jobRunId: id, accountId: accountId },
+    {
+      enabled: !!id && !!accountId,
+      refetchInterval(query) {
+        return query.state.data
+          ? refreshJobRunWhenJobRunning(query.state.data)
+          : 0;
+      },
+    }
+  );
+  const jobRun = data?.jobRun;
 
   const {
     data: eventData,
     isLoading: eventsIsLoading,
-    isValidating,
-    mutate: eventMutate,
-  } = useGetJobRunEvents(id, accountId, {
-    refreshIntervalFn: refreshEventsWhenEventsIncomplete,
-  });
+    isFetching: isValidating,
+    refetch: eventMutate,
+  } = useQuery(
+    getJobRunEvents,
+    { jobRunId: id, accountId: accountId },
+    {
+      enabled: !!id && !!accountId,
+      refetchInterval(query) {
+        return query.state.data
+          ? refreshEventsWhenEventsIncomplete(query.state.data)
+          : 0;
+      },
+    }
+  );
 
-  const jobRun = data?.jobRun;
+  const { mutateAsync: removeJobRunAsync } = useMutation(deleteJobRun);
+  const { mutateAsync: cancelJobRunAsync } = useMutation(cancelJobRun);
+  const { mutateAsync: terminateJobRunAsync } = useMutation(terminateJobRun);
+  const { mutateAsync: getRunContextAsync } = useMutation(getRunContext);
+
+  const [isViewSelectDialogOpen, setIsSelectDialogOpen] =
+    useState<boolean>(false);
+  const [activeSelectQuery, setActiveSelectQuery] = useState<SelectQuery>({
+    schema: '',
+    table: '',
+    select: '',
+  });
+  const [isRetrievingRunContext, setIsRetrievingRunContext] =
+    useState<boolean>(false);
+
+  const [duration, setDuration] = useState<string>('');
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (jobRun?.startedAt && jobRun?.status === JobRunStatusEnum.RUNNING) {
+      const updateDuration = () => {
+        if (jobRun?.startedAt?.toDate()) {
+          setDuration(getDuration(new Date(), jobRun?.startedAt?.toDate()));
+        }
+      };
+
+      updateDuration();
+      // sets up an interval to call the timer every second
+      timer = setInterval(updateDuration, 1000);
+    } else if (jobRun?.completedAt && jobRun?.startedAt) {
+      setDuration(
+        getDuration(jobRun.completedAt.toDate(), jobRun.startedAt.toDate())
+      );
+    }
+    // cleans up and restarts the interval if the job isn't done yet
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [jobRun?.startedAt, jobRun?.completedAt, jobRun?.status]);
 
   async function onDelete(): Promise<void> {
     try {
-      await removeJobRun(id, accountId);
-      toast({
-        title: 'Job run removed successfully!',
-      });
+      await removeJobRunAsync({ accountId: accountId, jobRunId: id });
+      toast.success('Job run removed successfully!');
       router.push(`/${account?.name}/runs`);
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove job run',
+      toast.error('Unable to remove job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   async function onCancel(): Promise<void> {
     try {
-      await cancelJobRun(id, accountId);
-      toast({
-        title: 'Job run canceled successfully!',
-      });
+      await cancelJobRunAsync({ accountId, jobRunId: id });
+      toast.success('Job run canceled successfully!');
       mutate();
       eventMutate();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to cancel job run',
+      toast.error('Unable to cancel job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   async function onTerminate(): Promise<void> {
     try {
-      await terminateJobRun(id, accountId);
-      toast({
-        title: 'Job run terminated successfully!',
-      });
+      await terminateJobRunAsync({ accountId, jobRunId: id });
+      toast.success('Job run terminated successfully!');
       mutate();
       eventMutate();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to terminate job run',
+      toast.error('Unable to terminate job run', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
+    }
+  }
+
+  async function onViewSelectClicked(
+    schema: string,
+    table: string
+  ): Promise<void> {
+    if (isRetrievingRunContext) {
+      return;
+    }
+    setIsRetrievingRunContext(true);
+    try {
+      const rcResp = await getRunContextAsync({
+        id: {
+          accountId: accountId,
+          externalId: buildBenthosRunCtxExternalId(schema, table),
+          jobRunId: id,
+        },
+      });
+      const runCtx = parseUint8ArrayToYaml(rcResp.value);
+      if (isValidRunContext(runCtx)) {
+        setActiveSelectQuery({
+          schema,
+          table,
+          select: runCtx.input.pooled_sql_raw.query,
+        });
+        setIsSelectDialogOpen(true);
+      } else {
+        toast.error('Unable to parse run context', {
+          description: `Was unable to pull Select Query out of run context for ${schema}.${table}`,
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Unable to retrieve select for table', {
+        description: getErrorMessage(err),
+      });
+    } finally {
+      setIsRetrievingRunContext(false);
     }
   }
 
@@ -121,8 +230,8 @@ export default function Page({ params }: PageProps): ReactElement {
                     <ButtonText leftIcon={<TrashIcon />} text="Delete" />
                   </Button>
                 }
-                headerText="Are you sure you want to delete this job run?"
-                description=""
+                headerText="Delete Job Run?"
+                description="Are you sure you want to delete this job run?"
                 onConfirm={async () => onDelete()}
               />
               {(jobRun?.status === JobRunStatusEnum.RUNNING ||
@@ -134,8 +243,8 @@ export default function Page({ params }: PageProps): ReactElement {
                         <ButtonText leftIcon={<Cross2Icon />} text="Cancel" />
                       </Button>
                     }
-                    headerText="Are you sure you want to cancel this job run?"
-                    description=""
+                    headerText="Cancel Job Run?"
+                    description="Are you sure you want to cancel this job run?"
                     onConfirm={async () => onCancel()}
                     buttonText="Cancel"
                     buttonVariant="default"
@@ -147,8 +256,8 @@ export default function Page({ params }: PageProps): ReactElement {
                         <ButtonText leftIcon={<TiCancel />} text="Terminate" />
                       </Button>
                     }
-                    headerText="Are you sure you want to terminate this job run?"
-                    description=""
+                    headerText="Terminate Job Run?"
+                    description="Are you sure you want to terminate this job run?"
                     onConfirm={async () => onTerminate()}
                     buttonText="Terminate"
                     buttonVariant="default"
@@ -191,7 +300,11 @@ export default function Page({ params }: PageProps): ReactElement {
             <StatCard
               header="Status"
               content={
-                <JobRunStatus status={jobRun?.status} className="text-lg" />
+                <JobRunStatus
+                  status={jobRun?.status}
+                  containerClassName="px-0"
+                  badgeClassName="text-lg"
+                />
               }
             />
             <StatCard
@@ -202,13 +315,7 @@ export default function Page({ params }: PageProps): ReactElement {
               header="Completion Time"
               content={formatDateTime(jobRun?.completedAt?.toDate())}
             />
-            <StatCard
-              header="Duration"
-              content={getDuration(
-                jobRun?.completedAt?.toDate(),
-                jobRun?.startedAt?.toDate()
-              )}
-            />
+            <StatCard header="Duration" content={duration} />
           </div>
           <div className="space-y-4">
             {jobRun?.pendingActivities.map((a) => {
@@ -230,19 +337,125 @@ export default function Page({ params }: PageProps): ReactElement {
               </div>
             )}
           <div className="space-y-4">
-            <div className="flex flex-row items-center space-x-2">
-              <h2 className="text-2xl font-bold tracking-tight">Activity</h2>
+            <div className="flex flex-row items-center justify-end space-x-2">
               {isValidating && <Spinner />}
             </div>
             {eventsIsLoading ? (
               <SkeletonTable />
             ) : (
-              <JobRunActivityTable jobRunEvents={eventData?.events} />
+              <JobRunActivityTable
+                jobRunEvents={eventData?.events}
+                onViewSelectClicked={onViewSelectClicked}
+                jobStatus={jobRun?.status}
+              />
             )}
           </div>
+          <ViewSelectDialog
+            isDialogOpen={isViewSelectDialogOpen}
+            setIsDialogOpen={setIsSelectDialogOpen}
+            query={activeSelectQuery}
+          />
         </div>
       )}
     </OverviewContainer>
+  );
+}
+
+// There is way more here, but this is currently all we care about
+interface RunContext {
+  input: {
+    pooled_sql_raw: {
+      query: string;
+    };
+  };
+}
+
+function isValidRunContext(input: unknown): input is RunContext {
+  const typedInput = input as Partial<RunContext>;
+  return !!typedInput?.input?.pooled_sql_raw?.query;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function parseUint8ArrayToYaml(data: Uint8Array): any {
+  try {
+    const yamlString = new TextDecoder().decode(data);
+    const result = yaml.parse(yamlString);
+    return result;
+  } catch (error) {
+    console.error('Error parsing YAML:', error);
+    return null;
+  }
+}
+
+function buildBenthosRunCtxExternalId(schema: string, table: string): string {
+  return `benthosconfig-${schema}.${table}.insert`;
+}
+
+interface SelectQuery {
+  schema: string;
+  table: string;
+  select: string;
+}
+
+interface ViewSelectDialogProps {
+  isDialogOpen: boolean;
+  setIsDialogOpen(open: boolean): void;
+  query: SelectQuery;
+}
+
+function ViewSelectDialog(props: ViewSelectDialogProps): ReactElement {
+  const { isDialogOpen, setIsDialogOpen, query } = props;
+  const { resolvedTheme } = useTheme();
+
+  const formattedQuery = useMemo(() => {
+    // todo: maybe update this to explicitly pass in the driver type so it formats it according to the correct connection
+    return formatSql(query.select);
+  }, [query.schema, query.table, query.select]);
+
+  return (
+    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+      <DialogContent className="lg:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>
+            SQL Select Query - {query.schema}.{query.table}
+          </DialogTitle>
+          <DialogDescription>
+            This was the query used to query the source database during the job
+            run
+          </DialogDescription>
+        </DialogHeader>
+        <div>
+          <Editor
+            height="50vh"
+            width="100%"
+            language="sql"
+            value={formattedQuery}
+            theme={resolvedTheme === 'dark' ? 'vs-dark' : 'cobalt'}
+            options={{
+              minimap: { enabled: false },
+              readOnly: true,
+              wordWrap: 'on',
+            }}
+          />
+        </div>
+        <DialogFooter className="md:justify-between">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => setIsDialogOpen(false)}
+          >
+            Close
+          </Button>
+          <CopyButton
+            buttonVariant="default"
+            onCopiedText="Success!"
+            onHoverText="Copy the SELECT Query"
+            textToCopy={query.select}
+            buttonText="Copy"
+          />
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -265,20 +478,15 @@ function StatCard(props: StatCardProps): ReactElement {
   );
 }
 
-function getDuration(dateTimeValue2?: Date, dateTimeValue1?: Date): string {
-  if (!dateTimeValue1 || !dateTimeValue2) {
+function getDuration(completedAt?: Date, startedAt?: Date): string {
+  if (!startedAt || !completedAt) {
     return '';
   }
-  var differenceValue =
-    (dateTimeValue2.getTime() - dateTimeValue1.getTime()) / 1000;
-  const minutes = Math.abs(Math.round(differenceValue / 60));
-  const seconds = Math.round(differenceValue % 60);
-  if (minutes === 0) {
-    return `${seconds} seconds`;
-  }
-  return `${minutes} minutes ${seconds} seconds`;
-}
 
+  const duration = intervalToDuration({ start: startedAt, end: completedAt });
+
+  return formatDuration(duration, { format: ['minutes', 'seconds'] });
+}
 interface AlertProps {
   title: string;
   description: string;
@@ -300,7 +508,7 @@ function ButtonLink(props: ButtonProps): ReactElement {
   const router = useRouter();
   const { account } = useAccount();
   if (!props.jobId) {
-    return <></>;
+    return <div />;
   }
   return (
     <Button
@@ -313,52 +521,4 @@ function ButtonLink(props: ButtonProps): ReactElement {
       />
     </Button>
   );
-}
-
-async function removeJobRun(
-  jobRunId: string,
-  accountId: string
-): Promise<void> {
-  const res = await fetch(`/api/accounts/${accountId}/runs/${jobRunId}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
-}
-
-async function cancelJobRun(
-  jobRunId: string,
-  accountId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/runs/${jobRunId}/cancel`,
-    {
-      method: 'PUT',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
-}
-
-async function terminateJobRun(
-  jobRunId: string,
-  accountId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/runs/${jobRunId}/terminate`,
-    {
-      method: 'PUT',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
 }

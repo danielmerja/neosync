@@ -31,3 +31,14 @@ frontend/out
 /package-lock.json
 
 env/
+
+tmp
+venv/
+venv2/
+python/dist/
+
+neosync_ee_ca.key
+neosync_cloud_ca.key
+
+.env.app.local
+.env.api.local

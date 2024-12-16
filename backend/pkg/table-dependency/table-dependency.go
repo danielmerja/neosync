@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
-	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	sqlmanager_shared "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/shared"
+	"github.com/nucleuscloud/neosync/backend/pkg/utils"
 )
 
 type RunType string
@@ -15,6 +15,11 @@ const (
 	RunTypeUpdate RunType = "update"
 	RunTypeInsert RunType = "insert"
 )
+
+type ConstraintColumns struct {
+	NullableColumns    []string
+	NonNullableColumns []string
+}
 
 type TableColumn struct {
 	Schema  string
@@ -27,61 +32,141 @@ type DependsOn struct {
 	Columns []string
 }
 
-type RunConfig struct {
-	Table         string // schema.table
-	SelectColumns []string
-	InsertColumns []string
-	DependsOn     []*DependsOn
-	RunType       RunType
-	PrimaryKeys   []string
-	WhereClause   *string
-	SelectQuery   *string
+type ForeignKey struct {
+	Columns     []string
+	NotNullable []bool
+	// ReferenceSchema  string  TODO: need to split out schema and table
+	ReferenceTable   string
+	ReferenceColumns []string
 }
 
-type ConstraintColumns struct {
-	NullableColumns    []string
-	NonNullableColumns []string
+type RunConfig struct {
+	table            string // schema.table  TODO: should use sqlmanager_shared.SchemaTable
+	selectColumns    []string
+	insertColumns    []string
+	dependsOn        []*DependsOn // this should be a list of config names like "table.insert", rename to dependsOnConfigs
+	foreignKeys      []*ForeignKey
+	runType          RunType
+	primaryKeys      []string
+	whereClause      *string
+	selectQuery      *string
+	splitColumnPaths bool
+}
+
+func newRunConfig(
+	table string,
+	runtype RunType,
+	primaryKeys []string,
+	whereClause *string,
+) *RunConfig {
+	return &RunConfig{
+		table:       table,
+		runType:     runtype,
+		primaryKeys: primaryKeys,
+		whereClause: whereClause,
+	}
+}
+
+func NewRunConfig(
+	table string,
+	runtype RunType,
+	primaryKeys []string,
+	whereClause *string,
+	selectCols, insertCols []string,
+	dependsOn []*DependsOn,
+	foreignKeys []*ForeignKey,
+	splitColumnPaths bool,
+) *RunConfig {
+	return &RunConfig{
+		table:            table,
+		runType:          runtype,
+		primaryKeys:      primaryKeys,
+		whereClause:      whereClause,
+		insertColumns:    insertCols,
+		selectColumns:    selectCols,
+		dependsOn:        dependsOn,
+		splitColumnPaths: splitColumnPaths,
+		foreignKeys:      foreignKeys,
+	}
+}
+
+func (rc *RunConfig) Table() string {
+	return rc.table
+}
+
+func (rc *RunConfig) SelectColumns() []string {
+	return rc.selectColumns
+}
+
+func (rc *RunConfig) InsertColumns() []string {
+	return rc.insertColumns
+}
+
+func (rc *RunConfig) DependsOn() []*DependsOn {
+	return rc.dependsOn
+}
+
+func (rc *RunConfig) RunType() RunType {
+	return rc.runType
+}
+
+func (rc *RunConfig) PrimaryKeys() []string {
+	return rc.primaryKeys
+}
+
+func (rc *RunConfig) WhereClause() *string {
+	return rc.whereClause
+}
+
+func (rc *RunConfig) SelectQuery() *string {
+	return rc.selectQuery
+}
+
+func (rc *RunConfig) SplitColumnPaths() bool {
+	return rc.splitColumnPaths
+}
+
+func (rc *RunConfig) ForeignKeys() []*ForeignKey {
+	return rc.foreignKeys
+}
+
+func (rc *RunConfig) appendSelectColumns(columns ...string) {
+	rc.selectColumns = append(rc.selectColumns, columns...)
+}
+
+func (rc *RunConfig) appendInsertColumns(columns ...string) {
+	rc.insertColumns = append(rc.insertColumns, columns...)
+}
+
+func (rc *RunConfig) appendDependsOn(table string, columns []string) {
+	rc.dependsOn = append(rc.dependsOn, &DependsOn{
+		Table:   table,
+		Columns: columns,
+	})
+}
+
+func (rc *RunConfig) appendForeignKey(fk *ForeignKey) {
+	rc.foreignKeys = append(rc.foreignKeys, fk)
+}
+
+func (rc *RunConfig) SetSelectQuery(query *string) {
+	rc.selectQuery = query
 }
 
 func GetRunConfigs(
-	dependencyMap map[string][]*sql_manager.ForeignConstraint,
+	dependencyMap map[string][]*sqlmanager_shared.ForeignConstraint,
 	subsets map[string]string,
 	primaryKeyMap map[string][]string,
 	tableColumnsMap map[string][]string,
 ) ([]*RunConfig, error) {
-	filteredDepsMap := map[string][]string{}                        // only include tables that are in tables arg list
-	foreignKeyMap := map[string]map[string][]string{}               // map: table -> foreign key table -> foreign key column
-	foreignKeyColsMap := map[string]map[string]*ConstraintColumns{} // map: table -> foreign key table -> ConstraintColumns
 	configs := []*RunConfig{}
 
-	for table, constraints := range dependencyMap {
-		foreignKeyMap[table] = map[string][]string{}
-		foreignKeyColsMap[table] = map[string]*ConstraintColumns{}
-		for _, constraint := range constraints {
-			if _, exists := foreignKeyColsMap[table][constraint.ForeignKey.Table]; !exists {
-				foreignKeyColsMap[table][constraint.ForeignKey.Table] = &ConstraintColumns{
-					NullableColumns:    []string{},
-					NonNullableColumns: []string{},
-				}
-			}
-			for idx, col := range constraint.ForeignKey.Columns {
-				notNullable := constraint.NotNullable[idx]
-				if notNullable {
-					foreignKeyColsMap[table][constraint.ForeignKey.Table].NonNullableColumns = append(foreignKeyColsMap[table][constraint.ForeignKey.Table].NonNullableColumns, col)
-				} else {
-					foreignKeyColsMap[table][constraint.ForeignKey.Table].NullableColumns = append(foreignKeyColsMap[table][constraint.ForeignKey.Table].NullableColumns, col)
-				}
-				foreignKeyMap[table][constraint.ForeignKey.Table] = append(foreignKeyMap[table][constraint.ForeignKey.Table], col)
-				if checkTableHasCols([]string{table, constraint.ForeignKey.Table}, tableColumnsMap) {
-					filteredDepsMap[table] = append(filteredDepsMap[table], constraint.ForeignKey.Table)
-				}
-			}
-		}
+	// dedupe table columns
+	for table, cols := range tableColumnsMap {
+		tableColumnsMap[table] = utils.DedupeSliceOrdered(cols)
 	}
 
-	for table, deps := range filteredDepsMap {
-		filteredDepsMap[table] = dedupeSlice(deps)
-	}
+	d := buildDependencies(dependencyMap, tableColumnsMap)
 
 	// create map containing all tables to track when each is processed
 	processed := make(map[string]bool, len(tableColumnsMap))
@@ -90,25 +175,52 @@ func GetRunConfigs(
 	}
 
 	// create configs for tables in circular dependencies
-	circularDeps := findCircularDependencies(filteredDepsMap)
+	circularDeps := FindCircularDependencies(d.filteredDeps)
 	groupedCycles := groupDependencies(circularDeps)
 	for _, group := range groupedCycles {
 		if len(group) == 0 {
 			continue
 		}
-		cycleConfigs, err := processCycles(group, tableColumnsMap, primaryKeyMap, subsets, dependencyMap, foreignKeyColsMap)
+		cycleConfigs, err := processCycles(group, tableColumnsMap, primaryKeyMap, subsets, dependencyMap, d.foreignKeyCols)
 		if err != nil {
 			return nil, err
 		}
 		// update table processed map
 		for _, cfg := range cycleConfigs {
-			processed[cfg.Table] = true
+			processed[cfg.Table()] = true
 		}
 		configs = append(configs, cycleConfigs...)
 	}
 
-	insertConfigs := processTables(processed, filteredDepsMap, foreignKeyMap, tableColumnsMap, primaryKeyMap, subsets)
+	insertConfigs := processTables(processed, d.filteredDeps, d.foreignKeys, tableColumnsMap, primaryKeyMap, subsets)
 	configs = append(configs, insertConfigs...)
+
+	// filter configs by subset
+	if len(subsets) > 0 {
+		configs = filterConfigsWithWhereClause(configs)
+	}
+
+	// Add foreign keys to configs
+	for _, config := range configs {
+		fks := dependencyMap[config.Table()]
+		for _, fk := range fks {
+			foreignKey := &ForeignKey{
+				ReferenceTable: fk.ForeignKey.Table,
+			}
+			for idx, col := range fk.Columns {
+				// by checking insert columns, we can skip foreign keys that are not needed for the insert
+				if slices.Contains(config.insertColumns, col) {
+					foreignKey.Columns = append(foreignKey.Columns, col)
+					foreignKey.NotNullable = append(foreignKey.NotNullable, fk.NotNullable[idx])
+					foreignKey.ReferenceColumns = append(foreignKey.ReferenceColumns, fk.ForeignKey.Columns[idx])
+				}
+			}
+
+			if len(foreignKey.Columns) > 0 {
+				config.appendForeignKey(foreignKey)
+			}
+		}
+	}
 
 	// check run path
 	if !isValidRunOrder(configs) {
@@ -118,25 +230,87 @@ func GetRunConfigs(
 	return configs, nil
 }
 
+// removes update configs that have where clause
+// breaks circular dependencies and self references when subset is applied
+func filterConfigsWithWhereClause(configs []*RunConfig) []*RunConfig {
+	result := make([]*RunConfig, 0)
+	visited := make(map[string]bool)
+	hasWhereClause := make(map[string]bool)
+
+	var isSubset func(*RunConfig) bool
+	isSubset = func(config *RunConfig) bool {
+		if hasWhereClause[config.Table()] {
+			return true
+		}
+
+		key := fmt.Sprintf("%s.%s", config.Table(), config.RunType())
+		if visited[key] {
+			return false
+		}
+		visited[key] = true
+
+		if config.WhereClause() != nil {
+			hasWhereClause[config.Table()] = true
+			return true
+		}
+
+		for _, dep := range config.DependsOn() {
+			for _, c := range configs {
+				if c.Table() == dep.Table {
+					if isSubset(c) {
+						hasWhereClause[config.Table()] = true
+						return true
+					}
+					break
+				}
+			}
+		}
+
+		return false
+	}
+
+	for _, config := range configs {
+		if isSubset(config) {
+			if config.RunType() == RunTypeInsert {
+				result = append(result, config)
+			}
+		} else {
+			result = append(result, config)
+		}
+	}
+
+	return result
+}
+
 func processCycles(
 	cycles [][]string,
 	tableColumnsMap map[string][]string,
 	primaryKeyMap map[string][]string,
 	subsets map[string]string,
-	dependencyMap map[string][]*sql_manager.ForeignConstraint,
+	dependencyMap map[string][]*sqlmanager_shared.ForeignConstraint,
 	foreignKeyColsMap map[string]map[string]*ConstraintColumns,
 ) ([]*RunConfig, error) {
 	configs := []*RunConfig{}
+	processed := map[string]bool{}
+	for _, cycle := range cycles {
+		for _, table := range cycle {
+			processed[table] = false
+		}
+	}
 	// determine start table
-	startTables, err := determineCycleStarts(cycles, subsets, dependencyMap)
+	startTables, err := DetermineCycleStarts(cycles, subsets, dependencyMap)
 	if err != nil {
 		return nil, err
 	}
+
 	if len(startTables) == 0 {
 		return nil, fmt.Errorf("unable to determine start of multi circular dependency: %+v", cycles)
 	}
 
 	for _, startTable := range startTables {
+		if processed[startTable] {
+			continue
+		}
 		// create insert and update configs for each start table
 		cols, colsOk := tableColumnsMap[startTable]
 		if !colsOk {
@@ -149,165 +323,70 @@ func processCycles(
 			return nil, fmt.Errorf("missing dependencies for table: %s", startTable)
 		}
 
-		insertConfig := &RunConfig{
-			Table:         startTable,
-			DependsOn:     []*DependsOn{},
-			RunType:       RunTypeInsert,
-			SelectColumns: []string{},
-			InsertColumns: []string{},
-			PrimaryKeys:   pks,
-			WhereClause:   &where,
-		}
-
-		updateConfig := &RunConfig{
-			Table:         startTable,
-			DependsOn:     []*DependsOn{{Table: startTable, Columns: pks}}, // add insert config as dependency to update config
-			RunType:       RunTypeUpdate,
-			SelectColumns: []string{},
-			InsertColumns: []string{},
-			PrimaryKeys:   pks,
-			WhereClause:   &where,
-		}
-		updateConfig.SelectColumns = append(updateConfig.SelectColumns, pks...)
+		insertConfig := newRunConfig(startTable, RunTypeInsert, pks, &where)
+		updateConfig := newRunConfig(startTable, RunTypeUpdate, pks, &where)
+		updateConfig.appendDependsOn(startTable, pks)
+		updateConfig.appendSelectColumns(pks...)
 		deps := foreignKeyColsMap[startTable]
+		// builds depends on slice
 		for fkTable, fkCols := range deps {
 			if fkTable == startTable {
 				continue
 			}
 			if isTableInCycles(cycles, fkTable) {
 				if len(fkCols.NullableColumns) > 0 {
-					updateConfig.DependsOn = append(updateConfig.DependsOn, &DependsOn{Table: fkTable, Columns: fkCols.NullableColumns})
+					updateConfig.appendDependsOn(fkTable, fkCols.NullableColumns)
 				} else {
-					insertConfig.DependsOn = append(insertConfig.DependsOn, &DependsOn{Table: fkTable, Columns: fkCols.NonNullableColumns})
+					insertConfig.appendDependsOn(fkTable, fkCols.NonNullableColumns)
 				}
 			} else {
-				insertConfig.DependsOn = append(insertConfig.DependsOn, &DependsOn{Table: fkTable, Columns: fkCols.NonNullableColumns})
+				insertCols := slices.Concat(fkCols.NonNullableColumns, fkCols.NullableColumns)
+				insertConfig.appendDependsOn(fkTable, insertCols)
 			}
 		}
+		// builds select + insert columns slices
 		for _, d := range dependencies {
-			for idx, col := range d.Columns {
-				if !d.NotNullable[idx] {
-					updateConfig.SelectColumns = append(updateConfig.SelectColumns, col)
-					updateConfig.InsertColumns = append(updateConfig.InsertColumns, col)
+			if isTableInCycles(cycles, d.ForeignKey.Table) {
+				for idx, col := range d.Columns {
+					if !d.NotNullable[idx] {
+						updateConfig.appendSelectColumns(col)
+						updateConfig.appendInsertColumns(col)
+					}
 				}
 			}
 		}
 		for _, col := range cols {
-			if !slices.Contains(updateConfig.InsertColumns, col) {
-				insertConfig.InsertColumns = append(insertConfig.InsertColumns, col)
+			if !slices.Contains(updateConfig.InsertColumns(), col) {
+				insertConfig.appendInsertColumns(col)
 			}
 			// select cols in insert config must be all columns due to S3 as possible output
-			insertConfig.SelectColumns = append(insertConfig.SelectColumns, col)
+			insertConfig.appendSelectColumns(col)
 		}
+
+		processed[startTable] = true
 		configs = append(configs, insertConfig, updateConfig)
 	}
 
-	allTables := []string{}
-	for _, cycle := range cycles {
-		allTables = append(allTables, cycle...)
-	}
 	// create insert configs for all other tables in cycles
-	for _, table := range allTables {
-		if slices.Contains(startTables, table) {
+	for table := range processed {
+		if processed[table] {
 			// skip. already created configs for start tables
 			continue
 		}
 		cols := tableColumnsMap[table]
 		pks := primaryKeyMap[table]
 		where := subsets[table]
-		config := &RunConfig{
-			Table:         table,
-			DependsOn:     []*DependsOn{},
-			RunType:       RunTypeInsert,
-			SelectColumns: cols,
-			InsertColumns: cols,
-			PrimaryKeys:   pks,
-			WhereClause:   &where,
-		}
+		config := newRunConfig(table, RunTypeInsert, pks, &where)
+		config.appendInsertColumns(cols...)
+		config.appendSelectColumns(cols...)
 		deps := foreignKeyColsMap[table]
 		for fkTable, fkCols := range deps {
-			config.DependsOn = append(config.DependsOn, &DependsOn{Table: fkTable, Columns: slices.Concat(fkCols.NullableColumns, fkCols.NonNullableColumns)})
+			config.appendDependsOn(fkTable, slices.Concat(fkCols.NullableColumns, fkCols.NonNullableColumns))
 		}
+
 		configs = append(configs, config)
 	}
 	return configs, err
-}
-
-func isTableInCycles(cycles [][]string, table string) bool {
-	for _, cycle := range cycles {
-		for _, t := range cycle {
-			if table == t {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func determineCycleStarts(
-	cycles [][]string,
-	subsets map[string]string,
-	dependencyMap map[string][]*sql_manager.ForeignConstraint,
-) ([]string, error) {
-	tableRankMap := map[string]int{}
-	possibleStarts := [][]string{}
-
-	// FK columns must be nullable to be a starting point
-	// filters out tables where foreign keys are not nullable
-	for _, cycle := range cycles {
-		filteredCycle := []string{}
-		for _, table := range cycle {
-			dependencies, ok := dependencyMap[table]
-			if !ok {
-				return nil, fmt.Errorf("missing dependencies for table: %s", table)
-			}
-			// FK columns must be nullable to be a starting point
-			if areAllFkColsNullable(dependencies, cycle) {
-				filteredCycle = append(filteredCycle, table)
-			}
-		}
-		possibleStarts = append(possibleStarts, filteredCycle)
-	}
-
-	// rank each table
-	for _, cycle := range possibleStarts {
-		for _, table := range cycle {
-			rank := 1
-			currRank, seen := tableRankMap[table]
-			if seen {
-				// intersect table
-				rank++
-			}
-			_, hasSubset := subsets[table]
-			if hasSubset {
-				rank += 2
-			}
-			tableRankMap[table] = rank + currRank
-		}
-	}
-
-	startingTables := map[string]struct{}{}
-	// for each cycle choose highest rank
-	for _, cycle := range possibleStarts {
-		var start *string
-		rank := 0
-		for _, table := range cycle {
-			table := table
-			tableRank := tableRankMap[table]
-			if tableRank > rank {
-				start = &table
-				rank = tableRank
-			}
-		}
-		if start != nil && *start != "" {
-			startingTables[*start] = struct{}{}
-		}
-	}
-	results := []string{}
-	for t := range startingTables {
-		results = append(results, t)
-	}
-	return results, nil
 }
 
 func checkTableHasCols(tables []string, tablesColMap map[string][]string) bool {
@@ -319,7 +398,7 @@ func checkTableHasCols(tables []string, tablesColMap map[string][]string) bool {
 	return true
 }
 
-func areAllFkColsNullable(dependencies []*sql_manager.ForeignConstraint, cycle []string) bool {
+func areAllFkColsNullable(dependencies []*sqlmanager_shared.ForeignConstraint, cycle []string) bool {
 	for _, dep := range dependencies {
 		if !slices.Contains(cycle, dep.ForeignKey.Table) {
 			continue
@@ -350,130 +429,19 @@ func processTables(
 		cols := tableColumnsMap[table]
 		pks := primaryKeyMap[table]
 		where := subsets[table]
-		config := &RunConfig{
-			Table:         table,
-			DependsOn:     []*DependsOn{},
-			RunType:       RunTypeInsert,
-			InsertColumns: cols,
-			SelectColumns: cols,
-			PrimaryKeys:   pks,
-			WhereClause:   &where,
-		}
+		config := newRunConfig(table, RunTypeInsert, pks, &where)
+		config.appendInsertColumns(cols...)
+		config.appendSelectColumns(cols...)
 		for _, dep := range dependencyMap[table] {
-			config.DependsOn = append(config.DependsOn, &DependsOn{Table: dep, Columns: foreignKeyMap[table][dep]})
+			config.appendDependsOn(dep, foreignKeyMap[table][dep])
 		}
 		configs = append(configs, config)
 	}
 	return configs
 }
 
-// returns all cycles table is in
-func getTableCirularDependencies(table string, circularDeps [][]string) [][]string {
-	cycles := [][]string{}
-	for _, cycle := range circularDeps {
-		if slices.Contains(cycle, table) {
-			cycles = append(cycles, cycle)
-		}
-	}
-	return cycles
-}
-
-func findCircularDependencies(dependencies map[string][]string) [][]string {
-	var result [][]string
-
-	for node := range dependencies {
-		visited, recStack := make(map[string]bool), make(map[string]bool)
-		dfsCycles(node, node, dependencies, visited, recStack, []string{}, &result)
-	}
-	return uniqueCycles(result)
-}
-
-// finds all possible path variations
-func dfsCycles(start, current string, dependencies map[string][]string, visited, recStack map[string]bool, path []string, result *[][]string) {
-	if recStack[current] {
-		if current == start {
-			// make copy to prevent reference issues
-			cycle := make([]string, len(path))
-			copy(cycle, path)
-			*result = append(*result, cycle)
-		}
-		return
-	}
-
-	recStack[current] = true
-	path = append(path, current)
-
-	for _, neighbor := range dependencies[current] {
-		if !visited[neighbor] {
-			dfsCycles(start, neighbor, dependencies, visited, recStack, path, result)
-		}
-	}
-
-	recStack[current] = false
-	if start == current {
-		visited[current] = true
-	}
-}
-
-func uniqueCycles(cycles [][]string) [][]string {
-	seen := map[string]bool{}
-	var unique [][]string
-
-	for _, cycle := range cycles {
-		key := buildCycleKey(cycle)
-		if !seen[key] {
-			seen[key] = true
-			unique = append(unique, cycle)
-		}
-	}
-
-	return unique
-}
-
-func buildCycleKey(cycle []string) string {
-	order := cycleOrder(cycle)
-	return strings.Join(order, ",")
-}
-
-func cycleOrder(cycle []string) []string {
-	if len(cycle) == 0 {
-		return []string{}
-	}
-	minVal := cycle[0]
-	for _, node := range cycle {
-		if node < minVal {
-			minVal = node
-		}
-	}
-
-	startIndex := -1
-	for i, node := range cycle {
-		if node == minVal && (startIndex == -1 || cycle[i-1] > cycle[(i+1)%len(cycle)]) {
-			startIndex = i
-		}
-	}
-
-	ordered := []string{}
-	for i := 0; i < len(cycle); i++ {
-		ordered = append(ordered, cycle[(startIndex+i)%len(cycle)])
-	}
-
-	return ordered
-}
-
-func getMultiTableCircularDependencies(dependencyMap map[string][]string) [][]string {
-	cycles := findCircularDependencies(dependencyMap)
-	multiTableCycles := [][]string{}
-	for _, c := range cycles {
-		if len(c) > 1 {
-			multiTableCycles = append(multiTableCycles, c)
-		}
-	}
-	return multiTableCycles
-}
-
 type OrderedTablesResult struct {
-	OrderedTables []string
+	OrderedTables []*sqlmanager_shared.SchemaTable
 	HasCycles     bool
 }
 
@@ -488,12 +456,13 @@ func GetTablesOrderedByDependency(dependencyMap map[string][]string) (*OrderedTa
 	for t := range dependencyMap {
 		tableMap[t] = struct{}{}
 	}
-	orderedTables := []string{}
+	orderedTables := []*sqlmanager_shared.SchemaTable{}
 	seenTables := map[string]struct{}{}
 	for table := range tableMap {
 		dep, ok := dependencyMap[table]
 		if !ok || len(dep) == 0 {
-			orderedTables = append(orderedTables, table)
+			s, t := sqlmanager_shared.SplitTableKey(table)
+			orderedTables = append(orderedTables, &sqlmanager_shared.SchemaTable{Schema: s, Table: t})
 			seenTables[table] = struct{}{}
 			delete(tableMap, table)
 		}
@@ -509,7 +478,8 @@ func GetTablesOrderedByDependency(dependencyMap map[string][]string) (*OrderedTa
 		for table := range tableMap {
 			deps := dependencyMap[table]
 			if isReady(seenTables, deps, table, cycles) {
-				orderedTables = append(orderedTables, table)
+				s, t := sqlmanager_shared.SplitTableKey(table)
+				orderedTables = append(orderedTables, &sqlmanager_shared.SchemaTable{Schema: s, Table: t})
 				seenTables[table] = struct{}{}
 				delete(tableMap, table)
 			}
@@ -542,100 +512,17 @@ func isReady(seen map[string]struct{}, deps []string, table string, cycles [][]s
 	return true
 }
 
-/*
-Example
-input := [][]string{
-	{"a", "b", "c"},
-	{"f", "d", "g"},
-	{"b", "e", "d"},
-	{"m", "i", "l"},
-	{"x", "y", "z"},
-}
-output := [][][]string{
-	{{"a", "b", "c"}, {"f", "d", "g"}, {"b", "e", "d"}},
-  {{"m", "i", "l"}},
-	{{"x", "y", "z"}},
-}
-*/
-// union all
-func groupDependencies(dependencies [][]string) [][][]string {
-	parent := make(map[string]string)
-	rank := make(map[string]int)
-
-	// init union-find structure
-	for _, group := range dependencies {
-		for _, item := range group {
-			if _, ok := parent[item]; !ok {
-				parent[item] = item
-				rank[item] = 0
-			}
-		}
-	}
-
-	// find root
-	var find func(x string) string
-	find = func(x string) string {
-		if parent[x] != x {
-			parent[x] = find(parent[x]) // path compression
-		}
-		return parent[x]
-	}
-
-	// union two sets
-	union := func(x, y string) {
-		rootX := find(x)
-		rootY := find(y)
-		if rootX != rootY {
-			if rank[rootX] > rank[rootY] {
-				parent[rootY] = rootX
-			} else if rank[rootX] < rank[rootY] {
-				parent[rootX] = rootY
-			} else {
-				parent[rootY] = rootX
-				rank[rootX]++
-			}
-		}
-	}
-
-	// union all
-	for _, group := range dependencies {
-		base := group[0]
-		for _, item := range group[1:] {
-			union(base, item)
-		}
-	}
-
-	// group by root
-	groupsMap := make(map[string][]string)
-	for item := range parent {
-		root := find(item)
-		groupsMap[root] = append(groupsMap[root], item)
-	}
-
-	groupLists := make(map[string][][]string)
-	for root := range groupsMap {
-		groupLists[root] = [][]string{}
-	}
-
-	for _, dependency := range dependencies {
-		root := find(dependency[0])
-		groupLists[root] = append(groupLists[root], dependency)
-	}
-
-	result := [][][]string{}
-	for _, groups := range groupLists {
-		result = append(result, groups)
-	}
-
-	return result
-}
-
 func isValidRunOrder(configs []*RunConfig) bool {
 	seenTables := map[string][]string{}
 
 	configMap := map[string]*RunConfig{}
 	for _, config := range configs {
-		configMap[fmt.Sprintf("%s.%s", config.Table, config.RunType)] = config
+		configName := fmt.Sprintf("%s.%s", config.Table(), config.RunType())
+		if _, exists := configMap[configName]; exists {
+			// configs should be unique
+			return false
+		}
+		configMap[configName] = config
 	}
 
 	prevTableLen := 0
@@ -647,13 +534,13 @@ func isValidRunOrder(configs []*RunConfig) bool {
 		prevTableLen = len(configMap)
 		for name, config := range configMap {
 			// root table
-			if len(config.DependsOn) == 0 {
-				seenTables[config.Table] = config.InsertColumns
+			if len(config.DependsOn()) == 0 {
+				seenTables[config.Table()] = config.InsertColumns()
 				delete(configMap, name)
 				continue
 			}
 			// child table
-			for _, d := range config.DependsOn {
+			for _, d := range config.DependsOn() {
 				seenCols, seen := seenTables[d.Table]
 				isReady := func() bool {
 					if !seen {
@@ -667,23 +554,11 @@ func isValidRunOrder(configs []*RunConfig) bool {
 					return true
 				}
 				if isReady() {
-					seenTables[config.Table] = append(seenTables[config.Table], config.InsertColumns...)
+					seenTables[config.Table()] = append(seenTables[config.Table()], config.InsertColumns()...)
 					delete(configMap, name)
 				}
 			}
 		}
 	}
 	return true
-}
-
-func dedupeSlice(input []string) []string {
-	set := map[string]any{}
-	for _, i := range input {
-		set[i] = struct{}{}
-	}
-	output := make([]string, 0, len(set))
-	for key := range set {
-		output = append(output, key)
-	}
-	return output
 }

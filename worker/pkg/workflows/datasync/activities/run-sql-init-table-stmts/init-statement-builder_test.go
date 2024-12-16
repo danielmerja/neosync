@@ -2,25 +2,41 @@ package runsqlinittablestmts_activity
 
 import (
 	"context"
-	"log/slog"
 	"slices"
 	"testing"
 
 	"connectrpc.com/connect"
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
-	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	"github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	sqlmanager_shared "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/shared"
+	connectionmanager "github.com/nucleuscloud/neosync/internal/connection-manager"
+	"github.com/nucleuscloud/neosync/internal/gotypeutil"
+	"github.com/nucleuscloud/neosync/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
-func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
+const (
+	workflowId = "workflow-id"
+)
+
+type fakeLicense struct{}
+
+func (f *fakeLicense) IsValid() bool {
+	return true
+}
+
+func Test_InitStatementBuilder_Pg_Generate_InitSchema(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
+	fkconnectionId := "789"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -39,7 +55,7 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 										},
 									},
 								},
-								FkSourceConnectionId: &connectionId,
+								FkSourceConnectionId: &fkconnectionId,
 							},
 						},
 					},
@@ -50,11 +66,10 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -65,7 +80,6 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -76,7 +90,7 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 				},
 				Destinations: []*mgmtv1alpha1.JobDestination{
 					{
-						ConnectionId: "456",
+						ConnectionId: connectionId,
 						Options: &mgmtv1alpha1.JobDestinationOptions{
 							Config: &mgmtv1alpha1.JobDestinationOptions_PostgresOptions{
 								PostgresOptions: &mgmtv1alpha1.PostgresDestinationConnectionOptions{
@@ -97,11 +111,32 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 		"GetConnection",
 		mock.Anything,
 		connect.NewRequest(&mgmtv1alpha1.GetConnectionRequest{
-			Id: "456",
+			Id: fkconnectionId,
 		}),
 	).Return(connect.NewResponse(&mgmtv1alpha1.GetConnectionResponse{
 		Connection: &mgmtv1alpha1.Connection{
-			Id:   "456",
+			Id:   connectionId,
+			Name: "prod",
+			ConnectionConfig: &mgmtv1alpha1.ConnectionConfig{
+				Config: &mgmtv1alpha1.ConnectionConfig_PgConfig{
+					PgConfig: &mgmtv1alpha1.PostgresConnectionConfig{
+						ConnectionConfig: &mgmtv1alpha1.PostgresConnectionConfig_Url{
+							Url: "postgresql://postgres:foofar@localhost:5435/nucleus",
+						},
+					},
+				},
+			},
+		},
+	}), nil)
+	mockConnectionClient.On(
+		"GetConnection",
+		mock.Anything,
+		connect.NewRequest(&mgmtv1alpha1.GetConnectionRequest{
+			Id: connectionId,
+		}),
+	).Return(connect.NewResponse(&mgmtv1alpha1.GetConnectionResponse{
+		Connection: &mgmtv1alpha1.Connection{
+			Id:   connectionId,
 			Name: "stage",
 			ConnectionConfig: &mgmtv1alpha1.ConnectionConfig{
 				Config: &mgmtv1alpha1.ConnectionConfig_PgConfig{
@@ -114,27 +149,43 @@ func Test_InitStatementBuilder_Pg_Generate(t *testing.T) {
 			},
 		},
 	}), nil)
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{}, nil)
-	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"TRUNCATE \"public\".\"users\" CASCADE;"}, &sql_manager.BatchExecOpts{}).Return(nil)
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(sqlmanager.NewPostgresSqlConnection(mockSqlDb), nil)
+	mockSqlDb.On("GetSequencesByTables", mock.Anything, mock.Anything, mock.Anything).Return([]*sqlmanager_shared.DataType{}, nil)
+	mockSqlDb.On("GetSchemaInitStatements", mock.Anything, []*sqlmanager_shared.SchemaTable{{Schema: "public", Table: "users"}}).Return([]*sqlmanager_shared.InitSchemaStatements{
+		{Label: "data types", Statements: []string{}},
+		{Label: "create table", Statements: []string{"test-create-statement"}},
+		{Label: "non-fk alter table", Statements: []string{"test-pk-statement"}},
+		{Label: "fk alter table", Statements: []string{"test-fk-statement"}},
+		{Label: "table index", Statements: []string{"test-idx-statement"}},
+		{Label: "table triggers", Statements: []string{"test-trigger-statement"}},
+	}, nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"TRUNCATE \"public\".\"users\" RESTART IDENTITY CASCADE;"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-trigger-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-create-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-pk-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-fk-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-idx-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_InitStatementBuilder_Pg_Generate_NoInitStatement(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -164,11 +215,10 @@ func Test_InitStatementBuilder_Pg_Generate_NoInitStatement(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -179,7 +229,6 @@ func Test_InitStatementBuilder_Pg_Generate_NoInitStatement(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -217,26 +266,28 @@ func Test_InitStatementBuilder_Pg_Generate_NoInitStatement(t *testing.T) {
 			},
 		},
 	}), nil)
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{}, nil)
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(sqlmanager.NewPostgresSqlConnection(mockSqlDb), nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_InitStatementBuilder_Pg_TruncateCascade(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -268,11 +319,10 @@ func Test_InitStatementBuilder_Pg_TruncateCascade(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -283,7 +333,6 @@ func Test_InitStatementBuilder_Pg_TruncateCascade(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -296,11 +345,10 @@ func Test_InitStatementBuilder_Pg_TruncateCascade(t *testing.T) {
 						Table:  "accounts",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -347,28 +395,31 @@ func Test_InitStatementBuilder_Pg_TruncateCascade(t *testing.T) {
 			},
 		},
 	}), nil)
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{}, nil)
-	stmts := []string{"TRUNCATE \"public\".\"users\" CASCADE;", "TRUNCATE \"public\".\"accounts\" CASCADE;"}
-	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, mock.MatchedBy(func(query []string) bool { return compareSlices(query, stmts) }), &sql_manager.BatchExecOpts{}).Return(nil)
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(sqlmanager.NewPostgresSqlConnection(mockSqlDb), nil)
+	mockSqlDb.On("GetSequencesByTables", mock.Anything, mock.Anything, mock.Anything).Return([]*sqlmanager_shared.DataType{}, nil)
+	stmts := []string{"TRUNCATE \"public\".\"users\" RESTART IDENTITY CASCADE;", "TRUNCATE \"public\".\"accounts\" RESTART IDENTITY CASCADE;"}
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, mock.MatchedBy(func(query []string) bool { return compareSlices(query, stmts) }), &sqlmanager_shared.BatchExecOpts{}).Return(nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_InitStatementBuilder_Pg_Truncate(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -400,11 +451,10 @@ func Test_InitStatementBuilder_Pg_Truncate(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -415,7 +465,6 @@ func Test_InitStatementBuilder_Pg_Truncate(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -428,11 +477,10 @@ func Test_InitStatementBuilder_Pg_Truncate(t *testing.T) {
 						Table:  "accounts",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -479,33 +527,39 @@ func Test_InitStatementBuilder_Pg_Truncate(t *testing.T) {
 			},
 		},
 	}), nil)
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{
-		"public.users": {{
-			Columns:     []string{"account_id"},
-			NotNullable: []bool{true},
-			ForeignKey:  &sql_manager.ForeignKey{Table: "public.accounts", Columns: []string{"id"}},
-		}},
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(sqlmanager.NewPostgresSqlConnection(mockSqlDb), nil)
+	mockSqlDb.On("GetTableConstraintsBySchema", mock.Anything, []string{"public"}).Return(&sqlmanager_shared.TableConstraints{
+		ForeignKeyConstraints: map[string][]*sqlmanager_shared.ForeignConstraint{
+			"public.users": {{
+				Columns:     []string{"account_id"},
+				NotNullable: []bool{true},
+				ForeignKey:  &sqlmanager_shared.ForeignKey{Table: "public.accounts", Columns: []string{"id"}},
+			}},
+		},
 	}, nil)
-	mockSqlDb.On("Exec", mock.Anything, "TRUNCATE TABLE \"public\".\"accounts\", \"public\".\"users\";").Return(nil)
+	mockSqlDb.On("GetSequencesByTables", mock.Anything, mock.Anything, mock.Anything).Return([]*sqlmanager_shared.DataType{}, nil)
+	mockSqlDb.On("Exec", mock.Anything, "TRUNCATE \"public\".\"accounts\", \"public\".\"users\" RESTART IDENTITY;").Return(nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_InitStatementBuilder_Pg_InitSchema(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -537,11 +591,10 @@ func Test_InitStatementBuilder_Pg_InitSchema(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -552,7 +605,6 @@ func Test_InitStatementBuilder_Pg_InitSchema(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -565,11 +617,10 @@ func Test_InitStatementBuilder_Pg_InitSchema(t *testing.T) {
 						Table:  "accounts",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -617,38 +668,42 @@ func Test_InitStatementBuilder_Pg_InitSchema(t *testing.T) {
 		},
 	}), nil)
 
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{
-		"public.users": {{
-			Columns:     []string{"account_id"},
-			NotNullable: []bool{true},
-			ForeignKey:  &sql_manager.ForeignKey{Table: "public.accounts", Columns: []string{"id"}},
-		}},
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Twice().Return(sqlmanager.NewPostgresSqlConnection(mockSqlDb), nil)
+	mockSqlDb.On("GetSchemaInitStatements", mock.Anything, mock.Anything).Return([]*sqlmanager_shared.InitSchemaStatements{
+		{Label: "data types", Statements: []string{}},
+		{Label: "create table", Statements: []string{"test-create-statement"}},
+		{Label: "non-fk alter table", Statements: []string{"test-pk-statement"}},
+		{Label: "fk alter table", Statements: []string{"test-fk-statement"}},
+		{Label: "table index", Statements: []string{"test-idx-statement"}},
+		{Label: "table triggers", Statements: []string{"test-trigger-statement"}},
 	}, nil)
-	accountCreateStmt := "CREATE TABLE IF NOT EXISTS \"public\".\"accounts\" (\"id\" uuid NOT NULL DEFAULT gen_random_uuid(), CONSTRAINT accounts_pkey PRIMARY KEY (id));"
-	usersCreateStmt := "CREATE TABLE IF NOT EXISTS \"public\".\"users\" (\"id\" uuid NOT NULL DEFAULT gen_random_uuid(), \"account_id\" uuid NULL, CONSTRAINT users_pkey PRIMARY KEY (id), CONSTRAINT accounts_pkey PRIMARY KEY (id));"
-	mockSqlDb.On("GetCreateTableStatement", mock.Anything, "public", "accounts").Return(accountCreateStmt, nil)
-	mockSqlDb.On("GetCreateTableStatement", mock.Anything, "public", "users").Return(usersCreateStmt, nil)
 
-	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{accountCreateStmt, usersCreateStmt}, &sql_manager.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-create-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-trigger-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-pk-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-fk-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
+	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, []string{"test-idx-statement"}, &sqlmanager_shared.BatchExecOpts{}).Return(nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_InitStatementBuilder_Mysql_Generate(t *testing.T) {
+	t.Parallel()
 	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
 	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
+	mockSqlDb := sqlmanager.NewMockSqlDatabase(t)
+	mockSqlManager := sqlmanager.NewMockSqlManagerClient(t)
 	connectionId := "456"
 
+	mockJobClient.On("SetRunContext", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.SetRunContextResponse{}), nil)
 	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
 		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
 			Job: &mgmtv1alpha1.Job{
@@ -678,11 +733,10 @@ func Test_InitStatementBuilder_Mysql_Generate(t *testing.T) {
 						Table:  "users",
 						Column: "id",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
 									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
+										IncludeHyphens: gotypeutil.ToPtr(true),
 									},
 								},
 							},
@@ -693,7 +747,6 @@ func Test_InitStatementBuilder_Mysql_Generate(t *testing.T) {
 						Table:  "users",
 						Column: "name",
 						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
 							Config: &mgmtv1alpha1.TransformerConfig{
 								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
 									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
@@ -741,172 +794,21 @@ func Test_InitStatementBuilder_Mysql_Generate(t *testing.T) {
 			},
 		},
 	}), nil)
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{}, nil)
+	mockSqlManager.On("NewSqlConnection", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(sqlmanager.NewMysqlSqlConnection(mockSqlDb), nil)
 	mockSqlDb.On("Close").Return(nil)
 
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
+	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient, &fakeLicense{}, workflowId)
 	_, err := bbuilder.RunSqlInitTableStatements(
 		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
-	)
-	assert.Nil(t, err)
-}
-
-func Test_InitStatementBuilder_Mysql_TruncateCreate(t *testing.T) {
-	mockJobClient := mgmtv1alpha1connect.NewMockJobServiceClient(t)
-	mockConnectionClient := mgmtv1alpha1connect.NewMockConnectionServiceClient(t)
-	mockSqlDb := sql_manager.NewMockSqlDatabase(t)
-	mockSqlManager := sql_manager.NewMockSqlManagerClient(t)
-
-	connectionId := "456"
-
-	mockJobClient.On("GetJob", mock.Anything, mock.Anything).
-		Return(connect.NewResponse(&mgmtv1alpha1.GetJobResponse{
-			Job: &mgmtv1alpha1.Job{
-				Source: &mgmtv1alpha1.JobSource{
-					Options: &mgmtv1alpha1.JobSourceOptions{
-						Config: &mgmtv1alpha1.JobSourceOptions_Mysql{
-							Mysql: &mgmtv1alpha1.MysqlSourceConnectionOptions{
-								Schemas: []*mgmtv1alpha1.MysqlSourceSchemaOption{
-									{
-										Schema: "public",
-										Tables: []*mgmtv1alpha1.MysqlSourceTableOption{
-											{
-												Table: "users",
-											},
-										},
-									},
-									{
-										Schema: "public",
-										Tables: []*mgmtv1alpha1.MysqlSourceTableOption{
-											{
-												Table: "accounts",
-											},
-										},
-									},
-								},
-								ConnectionId: connectionId,
-							},
-						},
-					},
-				},
-				Mappings: []*mgmtv1alpha1.JobMapping{
-					{
-						Schema: "public",
-						Table:  "users",
-						Column: "id",
-						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
-							Config: &mgmtv1alpha1.TransformerConfig{
-								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
-									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
-									},
-								},
-							},
-						},
-					},
-					{
-						Schema: "public",
-						Table:  "users",
-						Column: "name",
-						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_FULL_NAME,
-							Config: &mgmtv1alpha1.TransformerConfig{
-								Config: &mgmtv1alpha1.TransformerConfig_GenerateFullNameConfig{
-									GenerateFullNameConfig: &mgmtv1alpha1.GenerateFullName{},
-								},
-							},
-						},
-					},
-					{
-						Schema: "public",
-						Table:  "accounts",
-						Column: "id",
-						Transformer: &mgmtv1alpha1.JobMappingTransformer{
-							Source: mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_GENERATE_UUID,
-							Config: &mgmtv1alpha1.TransformerConfig{
-								Config: &mgmtv1alpha1.TransformerConfig_GenerateUuidConfig{
-									GenerateUuidConfig: &mgmtv1alpha1.GenerateUuid{
-										IncludeHyphens: true,
-									},
-								},
-							},
-						},
-					},
-				},
-				Destinations: []*mgmtv1alpha1.JobDestination{
-					{
-						ConnectionId: "456",
-						Options: &mgmtv1alpha1.JobDestinationOptions{
-							Config: &mgmtv1alpha1.JobDestinationOptions_MysqlOptions{
-								MysqlOptions: &mgmtv1alpha1.MysqlDestinationConnectionOptions{
-									TruncateTable: &mgmtv1alpha1.MysqlTruncateTableConfig{
-										TruncateBeforeInsert: true,
-									},
-									InitTableSchema: true,
-								},
-							},
-						},
-					},
-				},
-			},
-		}), nil)
-
-	mockConnectionClient.On(
-		"GetConnection",
-		mock.Anything,
-		connect.NewRequest(&mgmtv1alpha1.GetConnectionRequest{
-			Id: "456",
-		}),
-	).Return(connect.NewResponse(&mgmtv1alpha1.GetConnectionResponse{
-		Connection: &mgmtv1alpha1.Connection{
-			Id:   "456",
-			Name: "stage",
-			ConnectionConfig: &mgmtv1alpha1.ConnectionConfig{
-				Config: &mgmtv1alpha1.ConnectionConfig_MysqlConfig{
-					MysqlConfig: &mgmtv1alpha1.MysqlConnectionConfig{
-						ConnectionConfig: &mgmtv1alpha1.MysqlConnectionConfig_Url{
-							Url: "fake-prod-url",
-						},
-					},
-				},
-			},
-		},
-	}), nil)
-
-	mockSqlManager.On("NewPooledSqlDb", mock.Anything, mock.Anything, mock.Anything).Return(&sql_manager.SqlConnection{Db: mockSqlDb}, nil)
-	mockSqlDb.On("GetForeignKeyConstraintsMap", mock.Anything, []string{"public"}).Return(map[string][]*sql_manager.ForeignConstraint{
-		"public.users": {{
-			Columns:     []string{"account_id"},
-			NotNullable: []bool{true},
-			ForeignKey:  &sql_manager.ForeignKey{Table: "public.accounts", Columns: []string{"id"}},
-		}},
-	}, nil)
-	accountCreateStmt := "CREATE TABLE IF NOT EXISTS \"public\".\"accounts\" (\"id\" uuid NOT NULL DEFAULT gen_random_uuid(), CONSTRAINT accounts_pkey PRIMARY KEY (id));"
-	usersCreateStmt := "CREATE TABLE IF NOT EXISTS \"public\".\"users\" (\"id\" uuid NOT NULL DEFAULT gen_random_uuid(), \"account_id\" uuid NULL, CONSTRAINT users_pkey PRIMARY KEY (id), CONSTRAINT accounts_pkey PRIMARY KEY (id));"
-	mockSqlDb.On("GetCreateTableStatement", mock.Anything, "public", "accounts").Return(accountCreateStmt, nil)
-	mockSqlDb.On("GetCreateTableStatement", mock.Anything, "public", "users").Return(usersCreateStmt, nil)
-
-	createStmts := []string{accountCreateStmt, usersCreateStmt}
-	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, mock.MatchedBy(func(query []string) bool { return compareSlices(query, createStmts) }), &sql_manager.BatchExecOpts{}).Return(nil)
-	disableFkChecks := sql_manager.DisableForeignKeyChecks
-	truncateStmts := []string{"TRUNCATE \"public\".\"users\";", "TRUNCATE \"public\".\"accounts\";"}
-	mockSqlDb.On("BatchExec", mock.Anything, mock.Anything, mock.MatchedBy(func(query []string) bool { return compareSlices(query, truncateStmts) }), &sql_manager.BatchExecOpts{Prefix: &disableFkChecks}).Return(nil)
-	mockSqlDb.On("Close").Return(nil)
-
-	bbuilder := newInitStatementBuilder(mockSqlManager, mockJobClient, mockConnectionClient)
-	_, err := bbuilder.RunSqlInitTableStatements(
-		context.Background(),
-		&RunSqlInitTableStatementsRequest{JobId: "123", WorkflowId: "123"},
-		slog.Default(),
+		&RunSqlInitTableStatementsRequest{JobId: "123"},
+		connectionmanager.NewUniqueSession(),
+		testutil.GetTestLogger(t),
 	)
 	assert.Nil(t, err)
 }
 
 func Test_getFilteredForeignToPrimaryTableMap(t *testing.T) {
+	t.Parallel()
 	tables := map[string]struct{}{
 		"public.regions":     {},
 		"public.jobs":        {},
@@ -916,23 +818,23 @@ func Test_getFilteredForeignToPrimaryTableMap(t *testing.T) {
 		"public.departments": {},
 		"public.employees":   {},
 	}
-	dependencies := map[string][]*sql_manager.ForeignConstraint{
+	dependencies := map[string][]*sqlmanager_shared.ForeignConstraint{
 		"public.countries": {
-			{Columns: []string{"region_id"}, NotNullable: []bool{true}, ForeignKey: &sql_manager.ForeignKey{Table: "public.regions", Columns: []string{"region_id"}}},
+			{Columns: []string{"region_id"}, NotNullable: []bool{true}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.regions", Columns: []string{"region_id"}}},
 		},
 		"public.departments": {
-			{Columns: []string{"location_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.locations", Columns: []string{"location_id"}}},
+			{Columns: []string{"location_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.locations", Columns: []string{"location_id"}}},
 		},
 		"public.dependents": {
-			{Columns: []string{"dependent_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.employees", Columns: []string{"employees_id"}}},
+			{Columns: []string{"dependent_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.employees", Columns: []string{"employees_id"}}},
 		},
 		"public.locations": {
-			{Columns: []string{"country_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.countries", Columns: []string{"country_id"}}},
+			{Columns: []string{"country_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.countries", Columns: []string{"country_id"}}},
 		},
 		"public.employees": {
-			{Columns: []string{"department_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.departments", Columns: []string{"department_id"}}},
-			{Columns: []string{"job_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.jobs", Columns: []string{"job_id"}}},
-			{Columns: []string{"manager_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.employees", Columns: []string{"employee_id"}}},
+			{Columns: []string{"department_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.departments", Columns: []string{"department_id"}}},
+			{Columns: []string{"job_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.jobs", Columns: []string{"job_id"}}},
+			{Columns: []string{"manager_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.employees", Columns: []string{"employee_id"}}},
 		},
 	}
 
@@ -954,26 +856,27 @@ func Test_getFilteredForeignToPrimaryTableMap(t *testing.T) {
 }
 
 func Test_getFilteredForeignToPrimaryTableMap_filtered(t *testing.T) {
+	t.Parallel()
 	tables := map[string]struct{}{
 		"public.countries": {},
 	}
-	dependencies := map[string][]*sql_manager.ForeignConstraint{
+	dependencies := map[string][]*sqlmanager_shared.ForeignConstraint{
 		"public.countries": {
-			{Columns: []string{"region_id"}, NotNullable: []bool{true}, ForeignKey: &sql_manager.ForeignKey{Table: "public.regions", Columns: []string{"region_id"}}}},
+			{Columns: []string{"region_id"}, NotNullable: []bool{true}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.regions", Columns: []string{"region_id"}}}},
 
 		"public.departments": {
-			{Columns: []string{"location_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.locations", Columns: []string{"location_id"}}},
+			{Columns: []string{"location_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.locations", Columns: []string{"location_id"}}},
 		},
 		"public.dependents": {
-			{Columns: []string{"dependent_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.employees", Columns: []string{"employees_id"}}},
+			{Columns: []string{"dependent_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.employees", Columns: []string{"employees_id"}}},
 		},
 		"public.locations": {
-			{Columns: []string{"country_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.countries", Columns: []string{"country_id"}}},
+			{Columns: []string{"country_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.countries", Columns: []string{"country_id"}}},
 		},
 		"public.employees": {
-			{Columns: []string{"department_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.departments", Columns: []string{"department_id"}}},
-			{Columns: []string{"job_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.jobs", Columns: []string{"job_id"}}},
-			{Columns: []string{"manager_id"}, NotNullable: []bool{false}, ForeignKey: &sql_manager.ForeignKey{Table: "public.employees", Columns: []string{"employee_id"}}},
+			{Columns: []string{"department_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.departments", Columns: []string{"department_id"}}},
+			{Columns: []string{"job_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.jobs", Columns: []string{"job_id"}}},
+			{Columns: []string{"manager_id"}, NotNullable: []bool{false}, ForeignKey: &sqlmanager_shared.ForeignKey{Table: "public.employees", Columns: []string{"employee_id"}}},
 		},
 	}
 

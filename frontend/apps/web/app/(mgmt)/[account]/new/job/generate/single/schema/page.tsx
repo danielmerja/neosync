@@ -1,14 +1,28 @@
 'use client';
 
-import { getOnSelectedTableToggle } from '@/app/(mgmt)/[account]/jobs/[id]/source/components/util';
+import FormPersist from '@/app/(mgmt)/FormPersist';
+import { useOnApplyDefaultClick } from '@/app/(mgmt)/[account]/jobs/[id]/source/components/useOnApplyDefaultClick';
+import { useOnImportMappings } from '@/app/(mgmt)/[account]/jobs/[id]/source/components/useOnImportMappings';
+import { useOnTransformerBulkUpdateClick } from '@/app/(mgmt)/[account]/jobs/[id]/source/components/useOnTransformerBulkUpdateClick';
+import {
+  getFilteredTransformersForBulkSet,
+  getOnSelectedTableToggle,
+} from '@/app/(mgmt)/[account]/jobs/[id]/source/components/util';
+import {
+  clearNewJobSession,
+  getCreateNewSingleTableGenerateJobRequest,
+  getNewJobSessionKeys,
+  validateJobMapping,
+} from '@/app/(mgmt)/[account]/jobs/util';
 import OverviewContainer from '@/components/containers/OverviewContainer';
 import PageHeader from '@/components/headers/PageHeader';
 import {
+  getAllFormErrors,
   SchemaTable,
-  extractAllFormErrors,
 } from '@/components/jobs/SchemaTable/SchemaTable';
 import { getSchemaConstraintHandler } from '@/components/jobs/SchemaTable/schema-constraint-handler';
-import { setOnboardingConfig } from '@/components/onboarding-checklist/OnboardingChecklist';
+import { TransformerResult } from '@/components/jobs/SchemaTable/transformer-handler';
+import { getTransformerFilter } from '@/components/jobs/SchemaTable/util';
 import { useAccount } from '@/components/providers/account-provider';
 import { PageProps } from '@/components/types';
 import { Alert, AlertTitle } from '@/components/ui/alert';
@@ -23,77 +37,68 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetAccountOnboardingConfig } from '@/libs/hooks/useGetAccountOnboardingConfig';
-import { useGetConnectionForeignConstraints } from '@/libs/hooks/useGetConnectionForeignConstraints';
-import { useGetConnectionPrimaryConstraints } from '@/libs/hooks/useGetConnectionPrimaryConstraints';
-import { useGetConnectionSchemaMap } from '@/libs/hooks/useGetConnectionSchemaMap';
-import { useGetConnectionUniqueConstraints } from '@/libs/hooks/useGetConnectionUniqueConstraints';
-import { useGetConnections } from '@/libs/hooks/useGetConnections';
-import { convertMinutesToNanoseconds, getErrorMessage } from '@/util/util';
-import {
-  convertJobMappingTransformerFormToJobMappingTransformer,
-  toJobDestinationOptions,
-} from '@/yup-validations/jobs';
+import { useGetTransformersHandler } from '@/libs/hooks/useGetTransformersHandler';
+import { getSingleOrUndefined } from '@/libs/utils';
+import { getErrorMessage, getTransformerFromField } from '@/util/util';
+import { JobMappingTransformerForm } from '@/yup-validations/jobs';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
+import { ValidateJobMappingsResponse } from '@neosync/sdk';
 import {
-  ActivityOptions,
-  Connection,
-  CreateJobRequest,
-  CreateJobResponse,
-  GenerateSourceOptions,
-  GenerateSourceSchemaOption,
-  GenerateSourceTableOption,
-  GetAccountOnboardingConfigResponse,
-  JobDestination,
-  JobMapping,
-  JobSource,
-  JobSourceOptions,
-  RetryPolicy,
-  WorkflowOptions,
-} from '@neosync/sdk';
+  createJob,
+  getConnections,
+  getConnectionSchemaMap,
+  getConnectionTableConstraints,
+  validateJobMappings,
+} from '@neosync/sdk/connectquery';
 import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
 import { useRouter } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect, useMemo, useState } from 'react';
 import { useFieldArray, useForm } from 'react-hook-form';
-import useFormPersist from 'react-hook-form-persist';
+import { toast } from 'sonner';
 import { useSessionStorage } from 'usehooks-ts';
 import JobsProgressSteps, {
   getJobProgressSteps,
 } from '../../../JobsProgressSteps';
 import {
   DefineFormValues,
-  SINGLE_TABLE_SCHEMA_FORM_SCHEMA,
   SingleTableConnectFormValues,
   SingleTableSchemaFormValues,
-} from '../../../schema';
-const isBrowser = () => typeof window !== 'undefined';
+} from '../../../job-form-validations';
 
 export default function Page({ searchParams }: PageProps): ReactElement {
   const { account } = useAccount();
   const router = useRouter();
-  const { toast } = useToast();
-  const { data: onboardingData, mutate } = useGetAccountOnboardingConfig(
-    account?.id ?? ''
-  );
+  const posthog = usePostHog();
+
+  const [validateMappingsResponse, setValidateMappingsResponse] = useState<
+    ValidateJobMappingsResponse | undefined
+  >();
+
+  const [isValidatingMappings, setIsValidatingMappings] = useState(false);
 
   useEffect(() => {
     if (!searchParams?.sessionId) {
       router.push(`/${account?.name}/new/job`);
     }
   }, [searchParams?.sessionId]);
-  const { data: connectionsData } = useGetConnections(account?.id ?? '');
+  const { data: connectionsData } = useQuery(
+    getConnections,
+    { accountId: account?.id },
+    { enabled: !!account?.id }
+  );
   const connections = connectionsData?.connections ?? [];
 
-  const sessionPrefix = searchParams?.sessionId ?? '';
-
+  const sessionPrefix = getSingleOrUndefined(searchParams?.sessionId) ?? '';
+  const sessionKeys = getNewJobSessionKeys(sessionPrefix);
   // Used to complete the whole form
-  const defineFormKey = `${sessionPrefix}-new-job-define`;
+  const defineFormKey = sessionKeys.global.define;
   const [defineFormValues] = useSessionStorage<DefineFormValues>(
     defineFormKey,
     { jobName: '' }
   );
-  const connectFormKey = `${sessionPrefix}-new-job-single-table-connect`;
+  const connectFormKey = sessionKeys.generate.connect;
   const [connectFormValues] = useSessionStorage<SingleTableConnectFormValues>(
     connectFormKey,
     {
@@ -105,8 +110,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     }
   );
 
-  const formKey = `${sessionPrefix}-new-job-single-table-schema`;
-
+  const formKey = sessionKeys.generate.schema;
   const [schemaFormData] = useSessionStorage<SingleTableSchemaFormValues>(
     formKey,
     {
@@ -118,76 +122,56 @@ export default function Page({ searchParams }: PageProps): ReactElement {
   const {
     data: connectionSchemaDataMap,
     isLoading: isSchemaMapLoading,
-    isValidating: isSchemaMapValidating,
-  } = useGetConnectionSchemaMap(
-    account?.id ?? '',
-    connectFormValues.fkSourceConnectionId
+    isFetching: isSchemaMapValidating,
+  } = useQuery(
+    getConnectionSchemaMap,
+    { connectionId: connectFormValues.fkSourceConnectionId },
+    { enabled: !!connectFormValues.fkSourceConnectionId }
   );
+
+  const { mutateAsync: createJobAsync } = useMutation(createJob);
 
   const form = useForm({
     mode: 'onChange',
     resolver: yupResolver<SingleTableSchemaFormValues>(
-      SINGLE_TABLE_SCHEMA_FORM_SCHEMA
+      SingleTableSchemaFormValues
     ),
     values: schemaFormData,
     context: { accountId: account?.id },
   });
 
-  useFormPersist(formKey, {
-    watch: form.watch,
-    setValue: form.setValue,
-    storage: isBrowser() ? window.sessionStorage : undefined,
-  });
   const [isClient, setIsClient] = useState(false);
   useEffect(() => {
     setIsClient(true);
   }, []);
+
+  const { mutateAsync: validateJobMappingsAsync } =
+    useMutation(validateJobMappings);
 
   async function onSubmit(values: SingleTableSchemaFormValues) {
     if (!account) {
       return;
     }
     try {
-      const job = await createNewJob(
-        defineFormValues,
-        connectFormValues,
-        values,
-        account.id,
-        connections
+      const connMap = new Map(connections.map((c) => [c.id, c]));
+      const job = await createJobAsync(
+        getCreateNewSingleTableGenerateJobRequest(
+          {
+            define: defineFormValues,
+            connect: connectFormValues,
+            schema: values,
+          },
+          account.id,
+          (id) => connMap.get(id)
+        )
       );
-      toast({
-        title: 'Successfully created job!',
-        variant: 'success',
+      posthog.capture('New Job Created', {
+        jobType: 'generate',
       });
-      window.sessionStorage.removeItem(defineFormKey);
-      window.sessionStorage.removeItem(connectFormKey);
-      window.sessionStorage.removeItem(formKey);
 
-      // updates the onboarding data
-      if (!onboardingData?.config?.hasCreatedJob) {
-        try {
-          const resp = await setOnboardingConfig(account.id, {
-            hasCreatedSourceConnection:
-              onboardingData?.config?.hasCreatedSourceConnection ?? true,
-            hasCreatedDestinationConnection:
-              onboardingData?.config?.hasCreatedDestinationConnection ?? true,
-            hasCreatedJob: true,
-            hasInvitedMembers:
-              onboardingData?.config?.hasInvitedMembers ?? true,
-          });
-          mutate(
-            new GetAccountOnboardingConfigResponse({
-              config: resp.config,
-            })
-          );
-        } catch (e) {
-          toast({
-            title: 'Unable to update onboarding status!',
-            variant: 'destructive',
-          });
-        }
-      }
+      toast.success('Successfully created job!');
 
+      clearNewJobSession(window.sessionStorage, sessionPrefix);
       if (job.job?.id) {
         router.push(`/${account?.name}/jobs/${job.job.id}`);
       } else {
@@ -195,49 +179,58 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       }
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create job',
+      toast.error('Unable to create job', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
+  const formMappings = form.watch('mappings');
 
-  const { data: primaryConstraints, isValidating: isPkValidating } =
-    useGetConnectionPrimaryConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
-    );
+  async function validateMappings() {
+    try {
+      setIsValidatingMappings(true);
+      const res = await validateJobMapping(
+        connectFormValues.fkSourceConnectionId,
+        formMappings,
+        account?.id || '',
+        [],
+        validateJobMappingsAsync
+      );
+      setValidateMappingsResponse(res);
+    } catch (error) {
+      console.error('Failed to validate job mappings:', error);
+      toast.error('Unable to validate job mappings', {
+        description: getErrorMessage(error),
+      });
+    } finally {
+      setIsValidatingMappings(false);
+    }
+  }
 
-  const { data: foreignConstraints, isValidating: isFkValidating } =
-    useGetConnectionForeignConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
-    );
-
-  const { data: uniqueConstraints, isValidating: isUCValidating } =
-    useGetConnectionUniqueConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
+  const { data: tableConstraints, isFetching: isTableConstraintsValidating } =
+    useQuery(
+      getConnectionTableConstraints,
+      { connectionId: connectFormValues.fkSourceConnectionId },
+      { enabled: !!connectFormValues.fkSourceConnectionId }
     );
 
   const schemaConstraintHandler = useMemo(
     () =>
       getSchemaConstraintHandler(
         connectionSchemaDataMap?.schemaMap ?? {},
-        primaryConstraints?.tableConstraints ?? {},
-        foreignConstraints?.tableConstraints ?? {},
-        uniqueConstraints?.tableConstraints ?? {}
+        tableConstraints?.primaryKeyConstraints ?? {},
+        tableConstraints?.foreignKeyConstraints ?? {},
+        tableConstraints?.uniqueConstraints ?? {},
+        []
       ),
-    [isSchemaMapValidating, isPkValidating, isFkValidating, isUCValidating]
+    [isSchemaMapValidating, isTableConstraintsValidating]
   );
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
-  const { append, remove, fields } = useFieldArray<SingleTableSchemaFormValues>(
-    {
+  const { append, remove, fields, update } =
+    useFieldArray<SingleTableSchemaFormValues>({
       control: form.control,
       name: 'mappings',
-    }
-  );
+    });
 
   const onSelectedTableToggle = getOnSelectedTableToggle(
     connectionSchemaDataMap?.schemaMap ?? {},
@@ -247,6 +240,17 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     remove,
     append
   );
+
+  useEffect(() => {
+    if (!connectFormValues.fkSourceConnectionId || !account?.id) {
+      return;
+    }
+    const validateJobMappings = async () => {
+      await validateMappings();
+    };
+    validateJobMappings();
+  }, [selectedTables, connectFormValues.fkSourceConnectionId, account?.id]);
+
   useEffect(() => {
     if (isSchemaMapLoading || selectedTables.size > 0) {
       return;
@@ -259,10 +263,99 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     );
   }, [isSchemaMapLoading]);
 
-  const formMappings = form.watch('mappings');
+  const { handler } = useGetTransformersHandler(account?.id ?? '');
+
+  function onTransformerUpdate(
+    index: number,
+    transformer: JobMappingTransformerForm
+  ): void {
+    const val = form.getValues(`mappings.${index}`);
+    update(index, {
+      schema: val.schema,
+      table: val.table,
+      column: val.column,
+      transformer,
+    });
+  }
+
+  const { onClick: onImportMappingsClick } = useOnImportMappings({
+    setMappings(mappings) {
+      form.setValue('mappings', mappings, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: false,
+      });
+    },
+    getMappings() {
+      return form.getValues('mappings');
+    },
+    appendNewMappings(mappings) {
+      append(mappings);
+    },
+    setTransformer(idx, transformer) {
+      form.setValue(`mappings.${idx}.transformer`, transformer, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: false,
+      });
+    },
+    triggerUpdate() {
+      form.trigger('mappings');
+    },
+    setSelectedTables: setSelectedTables,
+  });
+
+  function getAvailableTransformers(idx: number): TransformerResult {
+    const row = formMappings[idx];
+    return handler.getFilteredTransformers(
+      getTransformerFilter(
+        schemaConstraintHandler,
+        {
+          schema: row.schema,
+          table: row.table,
+          column: row.column,
+        },
+        'sync'
+      )
+    );
+  }
+
+  const { onClick: onApplyDefaultClick } = useOnApplyDefaultClick({
+    getMappings() {
+      return form.getValues('mappings');
+    },
+    setMappings(mappings) {
+      form.setValue('mappings', mappings, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: false,
+      });
+    },
+    constraintHandler: schemaConstraintHandler,
+    triggerUpdate() {
+      form.trigger('mappings');
+    },
+  });
+
+  const { onClick: onTransformerBulkUpdate } = useOnTransformerBulkUpdateClick({
+    getMappings() {
+      return form.getValues('mappings');
+    },
+    setMappings(mappings) {
+      form.setValue('mappings', mappings, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: false,
+      });
+    },
+    triggerUpdate() {
+      form.trigger('mappings');
+    },
+  });
 
   return (
     <div className="flex flex-col gap-5">
+      <FormPersist formKey={formKey} form={form} />
       <OverviewContainer
         Header={
           <PageHeader
@@ -280,7 +373,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
         <div />
       </OverviewContainer>
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+        <form onSubmit={form.handleSubmit(onSubmit)}>
           <FormField
             control={form.control}
             name="numRows"
@@ -316,10 +409,36 @@ export default function Page({ searchParams }: PageProps): ReactElement {
               jobType={'generate'}
               selectedTables={selectedTables}
               onSelectedTableToggle={onSelectedTableToggle}
-              formErrors={extractAllFormErrors(
+              formErrors={getAllFormErrors(
                 form.formState.errors,
-                formMappings
+                formMappings,
+                validateMappingsResponse
               )}
+              onValidate={validateMappings}
+              isJobMappingsValidating={isValidatingMappings}
+              onImportMappingsClick={onImportMappingsClick}
+              onTransformerUpdate={(idx, cfg) => {
+                onTransformerUpdate(idx, cfg);
+              }}
+              getAvailableTransformers={getAvailableTransformers}
+              getTransformerFromField={(idx) => {
+                const row = formMappings[idx];
+                return getTransformerFromField(handler, row.transformer);
+              }}
+              getAvailableTransformersForBulk={(rows) => {
+                return getFilteredTransformersForBulkSet(
+                  rows,
+                  handler,
+                  schemaConstraintHandler,
+                  'sync',
+                  'relational'
+                );
+              }}
+              getTransformerFromFieldValue={(fvalue) => {
+                return getTransformerFromField(handler, fvalue);
+              }}
+              onApplyDefaultClick={onApplyDefaultClick}
+              onTransformerBulkUpdate={onTransformerBulkUpdate}
             />
           )}
           {form.formState.errors.root && (
@@ -330,7 +449,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
               </AlertTitle>
             </Alert>
           )}
-          <div className="flex flex-row gap-1 justify-between">
+          <div className="flex flex-row gap-1 justify-between pt-10">
             <Button key="back" type="button" onClick={() => router.back()}>
               Back
             </Button>
@@ -342,108 +461,4 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       </Form>
     </div>
   );
-}
-
-async function createNewJob(
-  define: DefineFormValues,
-  connect: SingleTableConnectFormValues,
-  schema: SingleTableSchemaFormValues,
-  accountId: string,
-  connections: Connection[]
-): Promise<CreateJobResponse> {
-  const connectionIdMap = new Map(
-    connections.map((connection) => [connection.id, connection])
-  );
-  let workflowOptions: WorkflowOptions | undefined = undefined;
-  if (define.workflowSettings?.runTimeout) {
-    workflowOptions = new WorkflowOptions({
-      runTimeout: convertMinutesToNanoseconds(
-        define.workflowSettings.runTimeout
-      ),
-    });
-  }
-  let syncOptions: ActivityOptions | undefined = undefined;
-  if (define.syncActivityOptions) {
-    const formSyncOpts = define.syncActivityOptions;
-    syncOptions = new ActivityOptions({
-      scheduleToCloseTimeout:
-        formSyncOpts.scheduleToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.scheduleToCloseTimeout)
-          : undefined,
-      startToCloseTimeout:
-        formSyncOpts.startToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.startToCloseTimeout)
-          : undefined,
-      retryPolicy: new RetryPolicy({
-        maximumAttempts: formSyncOpts.retryPolicy?.maximumAttempts,
-      }),
-    });
-  }
-  const tableSchema =
-    schema.mappings.length > 0 ? schema.mappings[0].schema : null;
-  const table = schema.mappings.length > 0 ? schema.mappings[0].table : null;
-  const body = new CreateJobRequest({
-    accountId,
-    jobName: define.jobName,
-    cronSchedule: define.cronSchedule,
-    initiateJobRun: define.initiateJobRun,
-    mappings: schema.mappings.map((m) => {
-      return new JobMapping({
-        schema: m.schema,
-        table: m.table,
-        column: m.column,
-        transformer: convertJobMappingTransformerFormToJobMappingTransformer(
-          m.transformer
-        ),
-      });
-    }),
-    source: new JobSource({
-      options: new JobSourceOptions({
-        config: {
-          case: 'generate',
-          value: new GenerateSourceOptions({
-            fkSourceConnectionId: connect.fkSourceConnectionId,
-            schemas:
-              tableSchema && table
-                ? [
-                    new GenerateSourceSchemaOption({
-                      schema: tableSchema,
-                      tables: [
-                        new GenerateSourceTableOption({
-                          rowCount: BigInt(schema.numRows),
-                          table: table,
-                        }),
-                      ],
-                    }),
-                  ]
-                : [],
-          }),
-        },
-      }),
-    }),
-    destinations: [
-      new JobDestination({
-        connectionId: connect.destination.connectionId,
-        options: toJobDestinationOptions(
-          connect.destination,
-          connectionIdMap.get(connect.destination.connectionId)
-        ),
-      }),
-    ],
-    workflowOptions: workflowOptions,
-    syncOptions: syncOptions,
-  });
-
-  const res = await fetch(`/api/accounts/${accountId}/jobs`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateJobResponse.fromJson(await res.json());
 }

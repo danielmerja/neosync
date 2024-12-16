@@ -158,6 +158,11 @@ const sidebars: SidebarsConfig = {
       id: 'deploy/auth',
       label: 'Authentication',
     },
+    {
+      type: 'doc',
+      id: 'deploy/database',
+      label: 'Database Setup',
+    },
 
     {
       type: 'html',
@@ -220,6 +225,41 @@ const sidebars: SidebarsConfig = {
       label: 'Troubleshooting',
     },
     {
+      type: 'doc',
+      id: 'guides/postgres-bastion-host',
+      label: 'Connect Postgres via Bastion Host',
+    },
+    {
+      type: 'doc',
+      id: 'guides/neosync-ip-ranges',
+      label: 'Neosync IP Ranges',
+    },
+    {
+      type: 'doc',
+      id: 'guides/syncing-data-in-mongodb',
+      label: 'Syncing data with MongoDB',
+    },
+    {
+      type: 'doc',
+      id: 'guides/anonymization-service-endpoints',
+      label: 'Anonymization Service Endpoints',
+    },
+    {
+      type: 'doc',
+      id: 'guides/viewing-job-run-logs',
+      label: 'Viewing Job Run Logs',
+    },
+    {
+      type: 'doc',
+      id: 'guides/incremental-data-sync',
+      label: 'Incremental Data Syncs',
+    },
+    {
+      type: 'doc',
+      id: 'guides/new-column-addition-strategies',
+      label: 'New Column Addition Strategies',
+    },
+    {
       type: 'html',
       value: '<div>Connections</div>',
       className: 'sidebarcategory',
@@ -240,6 +280,21 @@ const sidebars: SidebarsConfig = {
       label: 'S3',
     },
     {
+      type: 'doc',
+      id: 'connections/mongodb',
+      label: 'MongoDB',
+    },
+    {
+      type: 'doc',
+      id: 'connections/dynamodb',
+      label: 'DynamoDB',
+    },
+    {
+      type: 'doc',
+      id: 'connections/sqlserver',
+      label: 'Microsoft SQL Server',
+    },
+    {
       type: 'html',
       value: '<div>Transformers</div>',
       className: 'sidebarcategory',
@@ -256,6 +311,16 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'doc',
+      id: 'transformers/javascript',
+      label: 'Javascript',
+    },
+    {
+      type: 'doc',
+      id: 'transformers/sql-javascript',
+      label: 'SQL Type to JS Types',
+    },
+    {
+      type: 'doc',
       id: 'transformers/user-defined',
       label: 'User Defined',
     },
@@ -268,6 +333,11 @@ const sidebars: SidebarsConfig = {
       type: 'doc',
       id: 'table-constraints/foreign-keys',
       label: 'Foreign Keys',
+    },
+    {
+      type: 'doc',
+      id: 'table-constraints/virtual-foreign-keys',
+      label: 'Virtual Foreign Keys',
     },
     {
       type: 'doc',

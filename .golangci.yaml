@@ -1,21 +1,12 @@
 linters-settings:
-  depguard:
-    # new configuration
-    rules:
-      # logger:
-      #   deny:
-      #     # logging is allowed only by logutils.Log,
-      #     # logrus is allowed to use only in logutils package.
-      #     - pkg: "github.com/sirupsen/logrus"
-      #       desc: logging is allowed only by logutils.Log
   dupl:
-    threshold: 100
+    threshold: 150
   funlen:
     lines: -1 # the number of lines (code + empty lines) is not a right metric and leads to code without empty line or one-liner.
     statements: 50
   goconst:
     min-len: 2
-    min-occurrences: 3
+    min-occurrences: 10
   gocritic:
     enabled-tags:
       - diagnostic
@@ -29,14 +20,12 @@ linters-settings:
       - octalLiteral
       - whyNoLint
   gocyclo:
-    min-complexity: 15
+    min-complexity: 20
   gofmt:
     rewrite-rules:
       - pattern: "interface{}"
         replacement: "any"
-  goimports:
-    local-prefixes: github.com/golangci/golangci-lint
-  gomnd:
+  mnd:
     # don't include the "operation" and "assign"
     checks:
       - argument
@@ -53,15 +42,6 @@ linters-settings:
     ignored-functions:
       - strings.SplitN
 
-  govet:
-    check-shadowing: false
-    # settings:
-    #   printf:
-    #     funcs:
-    #       - (github.com/golangci/golangci-lint/pkg/logutils.Log).Infof
-    #       - (github.com/golangci/golangci-lint/pkg/logutils.Log).Warnf
-    #       - (github.com/golangci/golangci-lint/pkg/logutils.Log).Errorf
-    #       - (github.com/golangci/golangci-lint/pkg/logutils.Log).Fatalf
   lll:
     line-length: 140
   misspell:
@@ -80,92 +60,53 @@ linters:
   disable-all: true
   enable:
     - bodyclose
-    # - depguard
     - dogsled
-    # - dupl
     - errcheck
-    - exportloopref
     - forbidigo
-    # - funlen
-    # - gochecknoinits
     - goconst
     - gocritic
-    # - gocyclo
     - gofmt
     - goimports
-    # - gomnd
     - goprintffuncname
     - gosec
     - gosimple
     - govet
     - ineffassign
-    # - lll
     - misspell
     - nakedret
     - noctx
     - nolintlint
     - revive
     - staticcheck
-    # - stylecheck
     - typecheck
     - unconvert
     - unparam
     - unused
     - whitespace
-
-  # don't enable:
-  # - asciicheck
-  # - scopelint
-  # - gochecknoglobals
-  # - gocognit
-  # - godot
-  # - godox
-  # - goerr113
-  # - interfacer
-  # - maligned
-  # - nestif
-  # - prealloc
-  # - testpackage
-  # - wsl
+    - usestdlibvars
 
 issues:
-  excluded-dirs:
-    - marketing
+  exclude-dirs:
     - frontend
     - charts
     - docs
     - node_modules
+    - backend/gen
+    - tilt
+    - scripts
+    - python
+    - keycloak
   #   # Excluding configuration per-path, per-linter, per-text and per-source
   exclude-rules:
-    - path: _test\.go
+    - path: ^mock_.*\.go$
       linters:
-        - gomnd
-        - lll
-        - goconst
-        - gosec
-
-#     - path: pkg/golinters/errcheck.go
-#       text: "SA1019: errCfg.Exclude is deprecated: use ExcludeFunctions instead"
-#     - path: pkg/commands/run.go
-#       text: "SA1019: lsc.Errcheck.Exclude is deprecated: use ExcludeFunctions instead"
-#     - path: pkg/commands/run.go
-#       text: "SA1019: e.cfg.Run.Deadline is deprecated: Deadline exists for historical compatibility and should not be used."
-
-#     - path: pkg/golinters/gofumpt.go
-#       text: "SA1019: settings.LangVersion is deprecated: use the global `run.go` instead."
-#     - path: pkg/golinters/staticcheck_common.go
-#       text: "SA1019: settings.GoVersion is deprecated: use the global `run.go` instead."
-#     - path: pkg/lint/lintersdb/manager.go
-#       text: "SA1019: (.+).(GoVersion|LangVersion) is deprecated: use the global `run.go` instead."
-#     - path: pkg/golinters/unused.go
-#       text: "rangeValCopy: each iteration copies 160 bytes \\(consider pointers or indexing\\)"
-#     - path: test/(fix|linters)_test.go
-#       text: "string `gocritic.go` has 3 occurrences, make it a constant"
+        - gocritic
+        - gofmt
+        - goimports
+        - gosimple
+        - stylecheck
+        - whitespace
 
 run:
   timeout: 10m
-  # skip-dirs:
-  #   - test/testdata_etc # test files
-  #   - internal/cache # extracted from Go code
-  #   - internal/renameio # extracted from Go code
-  #   - internal/robustio # extracted from Go code
+  tests: false # exclude test files

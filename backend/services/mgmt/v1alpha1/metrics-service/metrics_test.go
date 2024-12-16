@@ -8,13 +8,12 @@ import (
 	"connectrpc.com/connect"
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
+	promapiv1mock "github.com/nucleuscloud/neosync/internal/mocks/github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	mockPromV1 "github.com/nucleuscloud/neosync/backend/internal/mocks/github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/nucleuscloud/neosync/backend/pkg/metrics"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
@@ -287,7 +286,7 @@ type serviceMocks struct {
 	Service                *Service
 	UserAccountServiceMock *mgmtv1alpha1connect.MockUserAccountServiceClient
 	JobServiceMock         *mgmtv1alpha1connect.MockJobServiceHandler
-	PromApiMock            *mockPromV1.MockAPI
+	PromApiMock            *promapiv1mock.MockAPI
 }
 
 func createServiceMock(t testing.TB, config *Config) *serviceMocks {
@@ -295,7 +294,7 @@ func createServiceMock(t testing.TB, config *Config) *serviceMocks {
 
 	mockUserAccService := mgmtv1alpha1connect.NewMockUserAccountServiceClient(t)
 	mockJobService := mgmtv1alpha1connect.NewMockJobServiceHandler(t)
-	mockPromApi := mockPromV1.NewMockAPI(t)
+	mockPromApi := promapiv1mock.NewMockAPI(t)
 
 	service := New(config, mockUserAccService, mockJobService, mockPromApi)
 	return &serviceMocks{
@@ -311,31 +310,6 @@ func mockIsUserInAccount(userAccountServiceMock *mgmtv1alpha1connect.MockUserAcc
 	userAccountServiceMock.On("IsUserInAccount", mock.Anything, mock.Anything).Return(connect.NewResponse(&mgmtv1alpha1.IsUserInAccountResponse{
 		Ok: isInAccount,
 	}), nil)
-}
-
-func Test_getPromQueryFromMetric(t *testing.T) {
-	output, err := getPromQueryFromMetric(
-		mgmtv1alpha1.RangedMetricName_RANGED_METRIC_NAME_INPUT_RECEIVED,
-		metrics.MetricLabels{metrics.NewEqLabel("foo", "bar"), metrics.NewEqLabel("foo2", "bar2")},
-		"1d",
-	)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, output)
-	assert.Equal(
-		t,
-		`sum(max_over_time(input_received_total{foo="bar",foo2="bar2"}[1d]))`,
-		output,
-	)
-}
-
-func Test_getPromQueryFromMetric_Invalid_Metric(t *testing.T) {
-	output, err := getPromQueryFromMetric(
-		mgmtv1alpha1.RangedMetricName_RANGED_METRIC_NAME_UNSPECIFIED,
-		metrics.MetricLabels{metrics.NewEqLabel("foo", "bar"), metrics.NewEqLabel("foo2", "bar2")},
-		"1d",
-	)
-	assert.Error(t, err)
-	assert.Empty(t, output)
 }
 
 func Test_GetDailyMetricCount_Empty_Matrix(t *testing.T) {

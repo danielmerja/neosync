@@ -1,81 +1,87 @@
 'use client';
 
+import FormPersist from '@/app/(mgmt)/FormPersist';
 import OverviewContainer from '@/components/containers/OverviewContainer';
 import PageHeader from '@/components/headers/PageHeader';
 import SubsetOptionsForm from '@/components/jobs/Form/SubsetOptionsForm';
 import EditItem from '@/components/jobs/subsets/EditItem';
-import SubsetTable from '@/components/jobs/subsets/subset-table/SubsetTable';
 import { TableRow } from '@/components/jobs/subsets/subset-table/column';
+import SubsetTable from '@/components/jobs/subsets/subset-table/SubsetTable';
 import {
   buildRowKey,
   buildTableRowData,
+  GetColumnsForSqlAutocomplete,
+  isValidSubsetType,
 } from '@/components/jobs/subsets/utils';
-import { setOnboardingConfig } from '@/components/onboarding-checklist/OnboardingChecklist';
+import LearnMoreLink from '@/components/labels/LearnMoreLink';
 import { useAccount } from '@/components/providers/account-provider';
 import { PageProps } from '@/components/types';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Form } from '@/components/ui/form';
 import { Separator } from '@/components/ui/separator';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetAccountOnboardingConfig } from '@/libs/hooks/useGetAccountOnboardingConfig';
-import { useGetConnections } from '@/libs/hooks/useGetConnections';
-import { convertMinutesToNanoseconds, getErrorMessage } from '@/util/util';
-import {
-  SchemaFormValues,
-  convertJobMappingTransformerFormToJobMappingTransformer,
-  toJobDestinationOptions,
-  toMysqlSourceSchemaOptions,
-  toPostgresSourceSchemaOptions,
-} from '@/yup-validations/jobs';
+import { getSingleOrUndefined } from '@/libs/utils';
+import { getErrorMessage } from '@/util/util';
+import { SchemaFormValues } from '@/yup-validations/jobs';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
+import { ConnectionConfig, JobMapping } from '@neosync/sdk';
 import {
-  ActivityOptions,
-  Connection,
-  CreateJobRequest,
-  CreateJobResponse,
-  GetAccountOnboardingConfigResponse,
-  JobDestination,
-  JobMapping,
-  JobSource,
-  JobSourceOptions,
-  MysqlSourceConnectionOptions,
-  PostgresSourceConnectionOptions,
-  RetryPolicy,
-  WorkflowOptions,
-} from '@neosync/sdk';
+  createJob,
+  getConnections,
+  getConnectionTableConstraints,
+} from '@neosync/sdk/connectquery';
+import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
 import { useRouter } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import useFormPersist from 'react-hook-form-persist';
+import { toast } from 'sonner';
 import { useSessionStorage } from 'usehooks-ts';
-import JobsProgressSteps, { getJobProgressSteps } from '../JobsProgressSteps';
+import { getConnectionType } from '../../../connections/util';
+import { showSubsetOptions } from '../../../jobs/[id]/subsets/components/SubsetCard';
+import {
+  clearNewJobSession,
+  getCreateNewSyncJobRequest,
+  getNewJobSessionKeys,
+} from '../../../jobs/util';
 import {
   ConnectFormValues,
   DefineFormValues,
-  FormValues,
-  SUBSET_FORM_SCHEMA,
   SubsetFormValues,
-} from '../schema';
+} from '../job-form-validations';
+import JobsProgressSteps, { getJobProgressSteps } from '../JobsProgressSteps';
 
 export default function Page({ searchParams }: PageProps): ReactElement {
   const { account } = useAccount();
   const router = useRouter();
-  const { data: onboardingData, mutate } = useGetAccountOnboardingConfig(
-    account?.id ?? ''
-  );
+  const posthog = usePostHog();
+
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
 
   useEffect(() => {
     if (!searchParams?.sessionId) {
       router.push(`/${account?.name}/new/job`);
     }
   }, [searchParams?.sessionId]);
-  const { toast } = useToast();
-  const { data: connectionsData } = useGetConnections(account?.id ?? '');
+  const { data: connectionsData } = useQuery(
+    getConnections,
+    { accountId: account?.id },
+    { enabled: !!account?.id }
+  );
   const connections = connectionsData?.connections ?? [];
 
-  const sessionPrefix = searchParams?.sessionId ?? '';
-  const formKey = `${sessionPrefix}-new-job-subset`;
+  const sessionPrefix = getSingleOrUndefined(searchParams?.sessionId) ?? '';
+  const sessionKeys = getNewJobSessionKeys(sessionPrefix);
 
+  const formKey = sessionKeys.dataSync.subset;
   const [subsetFormValues] = useSessionStorage<SubsetFormValues>(formKey, {
     subsets: [],
     subsetOptions: {
@@ -84,14 +90,14 @@ export default function Page({ searchParams }: PageProps): ReactElement {
   });
 
   // Used to complete the whole form
-  const defineFormKey = `${sessionPrefix}-new-job-define`;
+  const defineFormKey = sessionKeys.global.define;
   const [defineFormValues] = useSessionStorage<DefineFormValues>(
     defineFormKey,
     { jobName: '' }
   );
 
   // Used to complete the whole form
-  const connectFormKey = `${sessionPrefix}-new-job-connect`;
+  const connectFormKey = sessionKeys.dataSync.connect;
   const [connectFormValues] = useSessionStorage<ConnectFormValues>(
     connectFormKey,
     {
@@ -101,37 +107,53 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     }
   );
 
-  const schemaFormKey = `${sessionPrefix}-new-job-schema`;
+  const schemaFormKey = sessionKeys.dataSync.schema;
   const [schemaFormValues] = useSessionStorage<SchemaFormValues>(
     schemaFormKey,
     {
       mappings: [],
       connectionId: '',
+      destinationOptions: [],
     }
   );
 
-  const form = useForm({
-    resolver: yupResolver<SubsetFormValues>(SUBSET_FORM_SCHEMA),
-    defaultValues: subsetFormValues,
-  });
+  const { data: tableConstraints, isFetching: isTableConstraintsValidating } =
+    useQuery(
+      getConnectionTableConstraints,
+      { connectionId: schemaFormValues.connectionId },
+      { enabled: !!schemaFormValues.connectionId }
+    );
 
-  const isBrowser = () => typeof window !== 'undefined';
-  useFormPersist(formKey, {
-    watch: form.watch,
-    setValue: form.setValue,
-    storage: isBrowser() ? window.sessionStorage : undefined,
+  const { mutateAsync: createNewSyncJob } = useMutation(createJob);
+
+  const fkConstraints = tableConstraints?.foreignKeyConstraints;
+  const [rootTables, setRootTables] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isTableConstraintsValidating && fkConstraints) {
+      schemaFormValues.mappings.forEach((m) => {
+        const tn = `${m.schema}.${m.table}`;
+        if (!fkConstraints[tn]) {
+          rootTables.add(tn);
+          setRootTables(rootTables);
+        }
+      });
+    }
+  }, [fkConstraints, isTableConstraintsValidating]);
+
+  const form = useForm({
+    resolver: yupResolver<SubsetFormValues>(SubsetFormValues),
+    defaultValues: subsetFormValues,
   });
 
   const [itemToEdit, setItemToEdit] = useState<TableRow | undefined>();
 
-  const connectionType = connections.find(
+  const connection = connections.find(
     (item) => item.id == connectFormValues.sourceId
   );
 
-  const dbType =
-    connectionType?.connectionConfig?.config.case == 'mysqlConfig'
-      ? 'mysql'
-      : 'postgres';
+  const connectionType = getConnectionType(
+    connection?.connectionConfig ?? new ConnectionConfig()
+  );
 
   async function onSubmit(values: SubsetFormValues): Promise<void> {
     if (!account) {
@@ -139,49 +161,24 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     }
 
     try {
-      const job = await createNewJob(
-        {
-          define: defineFormValues,
-          connect: connectFormValues,
-          schema: schemaFormValues,
-          subset: values,
-        },
-        account.id,
-        connections
+      const connMap = new Map(connections.map((c) => [c.id, c]));
+      const job = await createNewSyncJob(
+        getCreateNewSyncJobRequest(
+          {
+            define: defineFormValues,
+            connect: connectFormValues,
+            schema: schemaFormValues,
+            subset: values,
+          },
+          account.id,
+          (id) => connMap.get(id)
+        )
       );
-      toast({
-        title: 'Successfully created the job!',
-        variant: 'success',
+      posthog.capture('New Job Flow Complete', {
+        jobType: 'data-sync',
       });
-      window.sessionStorage.removeItem(defineFormKey);
-      window.sessionStorage.removeItem(connectFormKey);
-      window.sessionStorage.removeItem(schemaFormKey);
-      window.sessionStorage.removeItem(formKey);
-
-      // updates the onboarding data
-      if (!onboardingData?.config?.hasCreatedJob) {
-        try {
-          const resp = await setOnboardingConfig(account.id, {
-            hasCreatedSourceConnection:
-              onboardingData?.config?.hasCreatedSourceConnection ?? true,
-            hasCreatedDestinationConnection:
-              onboardingData?.config?.hasCreatedDestinationConnection ?? true,
-            hasCreatedJob: true,
-            hasInvitedMembers:
-              onboardingData?.config?.hasInvitedMembers ?? true,
-          });
-          mutate(
-            new GetAccountOnboardingConfigResponse({
-              config: resp.config,
-            })
-          );
-        } catch (e) {
-          toast({
-            title: 'Unable to update onboarding status!',
-            variant: 'destructive',
-          });
-        }
-      }
+      toast.success('Successfully created the job!');
+      clearNewJobSession(window.sessionStorage, sessionPrefix);
 
       if (job.job?.id) {
         router.push(`/${account?.name}/jobs/${job.job.id}`);
@@ -190,16 +187,15 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       }
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create job',
+      toast.error('Unable to create job', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
   const tableRowData = buildTableRowData(
     schemaFormValues.mappings,
+    rootTables,
     form.watch().subsets
   );
 
@@ -237,13 +233,14 @@ export default function Page({ searchParams }: PageProps): ReactElement {
 
   return (
     <div className="px-12 md:px-24 lg:px-32 flex flex-col gap-5">
+      <FormPersist formKey={formKey} form={form} />
       <OverviewContainer
         Header={
           <PageHeader
             header="Subset"
             progressSteps={
               <JobsProgressSteps
-                steps={getJobProgressSteps('data-sync')}
+                steps={getJobProgressSteps('data-sync', true)}
                 stepName={'subset'}
               />
             }
@@ -253,220 +250,155 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       >
         <div />
       </OverviewContainer>
-      <div className="flex flex-col gap-4">
-        <Form {...form}>
-          <form
-            onSubmit={form.handleSubmit(onSubmit)}
-            className="flex flex-col gap-8"
-          >
-            <div>
-              <SubsetOptionsForm maxColNum={2} />
-            </div>
-            <div className="flex flex-col gap-2">
-              <div>
-                <SubsetTable
-                  data={Object.values(tableRowData)}
-                  onEdit={(schema, table) => {
-                    const key = buildRowKey(schema, table);
-                    if (tableRowData[key]) {
-                      // make copy so as to not edit in place
-                      setItemToEdit({
-                        ...tableRowData[key],
-                      });
-                    }
-                  }}
-                  hasLocalChange={hasLocalChange}
-                  onReset={onLocalRowReset}
-                />
-              </div>
-              <div className="my-4">
-                <Separator />
-              </div>
-              <div>
-                <EditItem
-                  connectionId={connectFormValues.sourceId}
-                  item={itemToEdit}
-                  onItem={setItemToEdit}
-                  onCancel={() => setItemToEdit(undefined)}
-                  onSave={() => {
-                    if (!itemToEdit) {
-                      return;
-                    }
-                    const key = buildRowKey(
-                      itemToEdit.schema,
-                      itemToEdit.table
-                    );
-                    const idx = form
-                      .getValues()
-                      .subsets.findIndex(
-                        (item) => buildRowKey(item.schema, item.table) === key
-                      );
-                    if (idx >= 0) {
-                      form.setValue(`subsets.${idx}`, {
-                        schema: itemToEdit.schema,
-                        table: itemToEdit.table,
-                        whereClause: itemToEdit.where,
-                      });
-                    } else {
-                      form.setValue(
-                        `subsets`,
-                        form.getValues().subsets.concat({
-                          schema: itemToEdit.schema,
-                          table: itemToEdit.table,
-                          whereClause: itemToEdit.where,
-                        })
-                      );
-                    }
-                    setItemToEdit(undefined);
-                  }}
-                  dbType={dbType}
-                />
-              </div>
+      {!isValidSubsetType(connectionType) && (
+        <Alert variant="warning">
+          <ExclamationTriangleIcon className="h-4 w-4" />
+          <AlertTitle>Heads up!</AlertTitle>
+          <AlertDescription>
+            Subsetting is not currently enabled for this connection type. You
+            may proceed with the creation of this job while we continue to work
+            on subsetting for this connection.
+          </AlertDescription>
+        </Alert>
+      )}
 
-              <div className="my-6">
-                <Separator />
+      {isValidSubsetType(connectionType) && (
+        <div className="flex flex-col gap-4">
+          <Form {...form}>
+            <form
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="flex flex-col gap-2"
+            >
+              <div>
+                {showSubsetOptions(connectionType) && (
+                  <SubsetOptionsForm maxColNum={2} />
+                )}
               </div>
-              <div className="flex flex-row gap-1 justify-between">
-                <Button key="back" type="button" onClick={() => router.back()}>
-                  Back
-                </Button>
-                <Button key="submit" type="submit">
-                  Save
-                </Button>
+              <div className="flex flex-col">
+                <div>
+                  <SubsetTable
+                    data={Object.values(tableRowData)}
+                    onEdit={(schema, table) => {
+                      setIsDialogOpen(true);
+                      const key = buildRowKey(schema, table);
+                      if (tableRowData[key]) {
+                        // make copy so as to not edit in place
+                        setItemToEdit({
+                          ...tableRowData[key],
+                        });
+                      }
+                    }}
+                    hasLocalChange={hasLocalChange}
+                    onReset={onLocalRowReset}
+                  />
+                </div>
+                <div
+                  // this prevents the tooltips inside of the dialog from automatically opening when the dialog opens since it stops the focus from being set in the dialog component
+                  onFocusCapture={(e) => {
+                    e.stopPropagation();
+                  }}
+                >
+                  <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+                    <DialogContent
+                      className="max-w-5xl"
+                      onPointerDownOutside={(e) => e.preventDefault()}
+                      onEscapeKeyDown={(e) => e.preventDefault()}
+                    >
+                      <DialogHeader>
+                        <div className="flex flex-row w-full">
+                          <div className="flex flex-col space-y-2 w-full">
+                            <div className="flex flex-row justify-between items-center">
+                              <div className="flex flex-row gap-4">
+                                <DialogTitle className="text-xl">
+                                  Subset Query
+                                </DialogTitle>
+                              </div>
+                            </div>
+                            <div className="flex flex-row items-center gap-2">
+                              <DialogDescription>
+                                Subset your data using SQL expressions.{' '}
+                                <LearnMoreLink href="https://docs.neosync.dev/table-constraints/subsetting" />
+                              </DialogDescription>
+                            </div>
+                          </div>
+                        </div>
+                        <Separator />
+                      </DialogHeader>
+                      <div className="pt-4">
+                        <EditItem
+                          connectionId={connectFormValues.sourceId}
+                          item={itemToEdit}
+                          onItem={setItemToEdit}
+                          onCancel={() => {
+                            setItemToEdit(undefined);
+                            setIsDialogOpen(false);
+                          }}
+                          columns={GetColumnsForSqlAutocomplete(
+                            schemaFormValues?.mappings.map((row) => {
+                              return new JobMapping({
+                                schema: row.schema,
+                                table: row.table,
+                                column: row.column,
+                              });
+                            }),
+                            itemToEdit
+                          )}
+                          onSave={() => {
+                            if (!itemToEdit) {
+                              return;
+                            }
+                            const key = buildRowKey(
+                              itemToEdit.schema,
+                              itemToEdit.table
+                            );
+                            const idx = form
+                              .getValues()
+                              .subsets.findIndex(
+                                (item) =>
+                                  buildRowKey(item.schema, item.table) === key
+                              );
+                            if (idx >= 0) {
+                              form.setValue(`subsets.${idx}`, {
+                                schema: itemToEdit.schema,
+                                table: itemToEdit.table,
+                                whereClause: itemToEdit.where,
+                              });
+                            } else {
+                              form.setValue(
+                                `subsets`,
+                                form.getValues().subsets.concat({
+                                  schema: itemToEdit.schema,
+                                  table: itemToEdit.table,
+                                  whereClause: itemToEdit.where,
+                                })
+                              );
+                            }
+                            setItemToEdit(undefined);
+                            setIsDialogOpen(false);
+                          }}
+                          connectionType={connectionType}
+                        />
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+                </div>
+                <div className="flex flex-row gap-1 justify-between pt-10">
+                  <Button
+                    key="back"
+                    type="button"
+                    onClick={() => router.back()}
+                  >
+                    Back
+                  </Button>
+                  <Button key="submit" type="submit">
+                    Save
+                  </Button>
+                </div>
               </div>
-            </div>
-          </form>
-        </Form>
-      </div>
+            </form>
+          </Form>
+        </div>
+      )}
     </div>
   );
-}
-
-async function createNewJob(
-  formData: FormValues,
-  accountId: string,
-  connections: Connection[]
-): Promise<CreateJobResponse> {
-  const connectionIdMap = new Map(
-    connections.map((connection) => [connection.id, connection])
-  );
-  const sourceConnection = connections.find(
-    (c) => c.id === formData.connect.sourceId
-  );
-
-  let workflowOptions: WorkflowOptions | undefined = undefined;
-  if (formData.define.workflowSettings?.runTimeout) {
-    workflowOptions = new WorkflowOptions({
-      runTimeout: convertMinutesToNanoseconds(
-        formData.define.workflowSettings.runTimeout
-      ),
-    });
-  }
-  let syncOptions: ActivityOptions | undefined = undefined;
-  if (formData.define.syncActivityOptions) {
-    const formSyncOpts = formData.define.syncActivityOptions;
-    syncOptions = new ActivityOptions({
-      scheduleToCloseTimeout:
-        formSyncOpts.scheduleToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.scheduleToCloseTimeout)
-          : undefined,
-      startToCloseTimeout:
-        formSyncOpts.startToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.startToCloseTimeout)
-          : undefined,
-      retryPolicy: new RetryPolicy({
-        maximumAttempts: formSyncOpts.retryPolicy?.maximumAttempts,
-      }),
-    });
-  }
-
-  const body = new CreateJobRequest({
-    accountId,
-    jobName: formData.define.jobName,
-    cronSchedule: formData.define.cronSchedule,
-    initiateJobRun: formData.define.initiateJobRun,
-    mappings: formData.schema.mappings.map((m) => {
-      return new JobMapping({
-        schema: m.schema,
-        table: m.table,
-        column: m.column,
-        transformer: convertJobMappingTransformerFormToJobMappingTransformer(
-          m.transformer
-        ),
-      });
-    }),
-    source: new JobSource({
-      options: toJobSourceOptions(formData, sourceConnection),
-    }),
-    destinations: formData.connect.destinations.map((d) => {
-      return new JobDestination({
-        connectionId: d.connectionId,
-        options: toJobDestinationOptions(
-          d,
-          connectionIdMap.get(d.connectionId)
-        ),
-      });
-    }),
-    workflowOptions: workflowOptions,
-    syncOptions: syncOptions,
-  });
-
-  function toJobSourceOptions(
-    values: FormValues,
-    connection?: Connection
-  ): JobSourceOptions {
-    if (!connection) {
-      return new JobSourceOptions();
-    }
-    switch (connection.connectionConfig?.config.case) {
-      case 'pgConfig':
-        return new JobSourceOptions({
-          config: {
-            case: 'postgres',
-            value: new PostgresSourceConnectionOptions({
-              connectionId: formData.connect.sourceId,
-              haltOnNewColumnAddition:
-                values.connect.sourceOptions.haltOnNewColumnAddition,
-              subsetByForeignKeyConstraints:
-                values.subset?.subsetOptions.subsetByForeignKeyConstraints,
-              schemas:
-                values.subset?.subsets &&
-                toPostgresSourceSchemaOptions(values.subset.subsets),
-            }),
-          },
-        });
-      case 'mysqlConfig':
-        return new JobSourceOptions({
-          config: {
-            case: 'mysql',
-            value: new MysqlSourceConnectionOptions({
-              connectionId: formData.connect.sourceId,
-              haltOnNewColumnAddition:
-                values.connect.sourceOptions.haltOnNewColumnAddition,
-              subsetByForeignKeyConstraints:
-                values.subset?.subsetOptions.subsetByForeignKeyConstraints,
-              schemas:
-                values.subset?.subsets &&
-                toMysqlSourceSchemaOptions(values.subset?.subsets),
-            }),
-          },
-        });
-      default:
-        throw new Error('unsupported connection type');
-    }
-  }
-
-  const res = await fetch(`/api/accounts/${accountId}/jobs`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-
-  return CreateJobResponse.fromJson(await res.json());
 }

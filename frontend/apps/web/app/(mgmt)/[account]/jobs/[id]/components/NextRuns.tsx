@@ -1,5 +1,4 @@
 'use client';
-import { useAccount } from '@/components/providers/account-provider';
 import { Alert, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -10,9 +9,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useGetJobNextRuns } from '@/libs/hooks/useGetJobNextRuns';
 import { formatDateTime } from '@/util/util';
+import { useQuery } from '@connectrpc/connect-query';
 import { JobStatus } from '@neosync/sdk';
+import { getJobNextRuns } from '@neosync/sdk/connectquery';
 import { ReactElement } from 'react';
 
 interface Props {
@@ -21,10 +21,10 @@ interface Props {
 }
 
 export default function JobNextRuns({ jobId, status }: Props): ReactElement {
-  const { account } = useAccount();
-  const { data, isLoading, error } = useGetJobNextRuns(
-    account?.id ?? '',
-    jobId
+  const { data, isLoading, error } = useQuery(
+    getJobNextRuns,
+    { jobId },
+    { enabled: !!jobId }
   );
 
   if (isLoading) {
@@ -61,7 +61,7 @@ export default function JobNextRuns({ jobId, status }: Props): ReactElement {
                     <TableRow key={`${r}-${index}`}>
                       <TableCell className="py-3">
                         <span className="font-medium">
-                          {formatDateTime(r.toDate())}
+                          {formatDateTime(r?.toDate())}
                         </span>
                       </TableCell>
                     </TableRow>

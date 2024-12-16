@@ -15,16 +15,20 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { OpenAiFormValues } from '@/yup-validations/connections';
-import { yupResolver } from '@hookform/resolvers/yup';
 import {
-  ConnectionConfig,
-  OpenAiConnectionConfig,
-  UpdateConnectionRequest,
-  UpdateConnectionResponse,
-} from '@neosync/sdk';
+  EditConnectionFormContext,
+  OpenAiFormValues,
+} from '@/yup-validations/connections';
+import { useMutation } from '@connectrpc/connect-query';
+import { yupResolver } from '@hookform/resolvers/yup';
+import { UpdateConnectionResponse } from '@neosync/sdk';
+import {
+  isConnectionNameAvailable,
+  updateConnection,
+} from '@neosync/sdk/connectquery';
 import { ReactElement } from 'react';
 import { useForm } from 'react-hook-form';
+import { buildConnectionConfigOpenAi } from '../../util';
 
 interface Props {
   connectionId: string;
@@ -36,16 +40,20 @@ interface Props {
 export default function OpenAiForm(props: Props): ReactElement {
   const { connectionId, defaultValues, onSaved, onSaveFailed } = props;
   const { account } = useAccount();
-
-  const form = useForm<OpenAiFormValues>({
+  const { mutateAsync: isConnectionNameAvailableAsync } = useMutation(
+    isConnectionNameAvailable
+  );
+  const form = useForm<OpenAiFormValues, EditConnectionFormContext>({
     resolver: yupResolver(OpenAiFormValues),
     mode: 'onChange',
     values: defaultValues,
     context: {
       originalConnectionName: defaultValues.connectionName,
       accountId: account?.id ?? '',
+      isConnectionNameAvailable: isConnectionNameAvailableAsync,
     },
   });
+  const { mutateAsync } = useMutation(updateConnection);
 
   async function onSubmit(values: OpenAiFormValues): Promise<void> {
     if (!account) {
@@ -53,11 +61,11 @@ export default function OpenAiForm(props: Props): ReactElement {
     }
 
     try {
-      const connectionResp = await updateConnection(
-        values,
-        connectionId,
-        account.id
-      );
+      const connectionResp = await mutateAsync({
+        id: connectionId,
+        name: values.connectionName,
+        connectionConfig: buildConnectionConfigOpenAi(values),
+      });
       onSaved(connectionResp);
     } catch (err) {
       console.error(err);
@@ -137,40 +145,4 @@ export default function OpenAiForm(props: Props): ReactElement {
       </form>
     </Form>
   );
-}
-
-async function updateConnection(
-  values: OpenAiFormValues,
-  connectionId: string,
-  accountId: string
-): Promise<UpdateConnectionResponse> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/connections/${connectionId}`,
-    {
-      method: 'PUT',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(
-        new UpdateConnectionRequest({
-          id: connectionId,
-          name: values.connectionName,
-          connectionConfig: new ConnectionConfig({
-            config: {
-              case: 'openaiConfig',
-              value: new OpenAiConnectionConfig({
-                apiUrl: values.sdk.url,
-                apiKey: values.sdk.apiKey,
-              }),
-            },
-          }),
-        })
-      ),
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return UpdateConnectionResponse.fromJson(await res.json());
 }

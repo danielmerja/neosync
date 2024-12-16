@@ -2,40 +2,58 @@ package runsqlinittablestmts_activity
 
 import (
 	"context"
-	"sync"
 	"time"
 
-	mysql_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/mysql"
-	pg_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/postgresql"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
-	"github.com/nucleuscloud/neosync/backend/pkg/sqlconnect"
 	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
-	logger_utils "github.com/nucleuscloud/neosync/worker/internal/logger"
-	"github.com/nucleuscloud/neosync/worker/pkg/workflows/datasync/activities/shared"
+	connectionmanager "github.com/nucleuscloud/neosync/internal/connection-manager"
+	"github.com/nucleuscloud/neosync/internal/ee/license"
+	temporallogger "github.com/nucleuscloud/neosync/worker/internal/temporal-logger"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/log"
 )
 
+type Activity struct {
+	jobclient  mgmtv1alpha1connect.JobServiceClient
+	connclient mgmtv1alpha1connect.ConnectionServiceClient
+
+	sqlmanager sql_manager.SqlManagerClient
+
+	eelicense license.EEInterface
+}
+
+func New(
+	jobclient mgmtv1alpha1connect.JobServiceClient,
+	connclient mgmtv1alpha1connect.ConnectionServiceClient,
+	sqlmanager sql_manager.SqlManagerClient,
+	eelicense license.EEInterface,
+) *Activity {
+	return &Activity{
+		jobclient:  jobclient,
+		connclient: connclient,
+		sqlmanager: sqlmanager,
+		eelicense:  eelicense,
+	}
+}
+
 type RunSqlInitTableStatementsRequest struct {
-	JobId      string
-	WorkflowId string
+	JobId string
 }
 
 type RunSqlInitTableStatementsResponse struct {
 }
 
-func RunSqlInitTableStatements(
+func (a *Activity) RunSqlInitTableStatements(
 	ctx context.Context,
 	req *RunSqlInitTableStatementsRequest,
 ) (*RunSqlInitTableStatementsResponse, error) {
+	info := activity.GetInfo(ctx)
 	logger := log.With(
 		activity.GetLogger(ctx),
 		"jobId", req.JobId,
-		"WorkflowID", req.WorkflowId,
-		// "RunID", wfmetadata.RunId,
+		"WorkflowID", info.WorkflowExecution.ID,
+		"RunID", info.WorkflowExecution.RunID,
 	)
-	_ = logger
-
 	go func() {
 		for {
 			select {
@@ -47,32 +65,18 @@ func RunSqlInitTableStatements(
 		}
 	}()
 
-	neosyncUrl := shared.GetNeosyncUrl()
-	httpClient := shared.GetNeosyncHttpClient()
-
-	pgpoolmap := &sync.Map{}
-	pgquerier := pg_queries.New()
-	mysqlpoolmap := &sync.Map{}
-	mysqlquerier := mysql_queries.New()
-	sqlmanager := sql_manager.NewSqlManager(pgpoolmap, pgquerier, mysqlpoolmap, mysqlquerier, &sqlconnect.SqlOpenConnector{})
-
-	jobclient := mgmtv1alpha1connect.NewJobServiceClient(
-		httpClient,
-		neosyncUrl,
-	)
-
-	connclient := mgmtv1alpha1connect.NewConnectionServiceClient(
-		httpClient,
-		neosyncUrl,
-	)
 	builder := newInitStatementBuilder(
-		sqlmanager,
-		jobclient,
-		connclient,
+		a.sqlmanager,
+		a.jobclient,
+		a.connclient,
+		a.eelicense,
+		info.WorkflowExecution.ID,
 	)
-	slogger := logger_utils.NewJsonSLogger().With(
-		"jobId", req.JobId,
-		"WorkflowID", req.WorkflowId,
+	slogger := temporallogger.NewSlogger(logger)
+	return builder.RunSqlInitTableStatements(
+		ctx,
+		req,
+		connectionmanager.NewUniqueSession(connectionmanager.WithSessionGroup(info.WorkflowExecution.ID)),
+		slogger,
 	)
-	return builder.RunSqlInitTableStatements(ctx, req, slogger)
 }

@@ -1,13 +1,16 @@
+import EmptyState, { EmptyStateLinkButton } from '@/components/EmptyState';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonTable from '@/components/skeleton/SkeletonTable';
 import {
   JobRunsAutoRefreshInterval,
   onJobRunsAutoRefreshInterval,
   onJobRunsPaused,
-  useGetJobRuns,
-} from '@/libs/hooks/useGetJobRuns';
-import { useGetJobs } from '@/libs/hooks/useGetJobs';
+} from '@/libs/utils';
+import { useQuery } from '@connectrpc/connect-query';
+import { getJobRuns, getJobs } from '@neosync/sdk/connectquery';
+import { ArrowTopRightIcon } from '@radix-ui/react-icons';
 import { ReactElement, useMemo, useState } from 'react';
+import { GoStack } from 'react-icons/go';
 import { getColumns } from './JobRunsTable/columns';
 import { DataTable } from './JobRunsTable/data-table';
 
@@ -26,20 +29,30 @@ export default function RunsTable(props: RunsTableProps): ReactElement {
   const { account } = useAccount();
   const [refreshInterval, setAutoRefreshInterval] =
     useState<JobRunsAutoRefreshInterval>('1m');
-  const { isLoading, data, mutate, isValidating } = useGetJobRuns(
-    account?.id ?? '',
+  const {
+    isLoading,
+    data,
+    refetch: mutate,
+    isFetching: isValidating,
+  } = useQuery(
+    getJobRuns,
+    { id: { case: 'accountId', value: account?.id ?? '' } },
     {
-      refreshIntervalFn: () => onJobRunsAutoRefreshInterval(refreshInterval),
-      isPaused: () => onJobRunsPaused(refreshInterval),
+      enabled() {
+        return !!account?.id && !onJobRunsPaused(refreshInterval);
+      },
+      refetchInterval() {
+        return onJobRunsAutoRefreshInterval(refreshInterval);
+      },
     }
   );
 
   const {
     data: jobsData,
-    mutate: jobsMutate,
+    refetch: jobsMutate,
     isLoading: isJobsLoading,
-    isValidating: isJobsValidating,
-  } = useGetJobs(account?.id ?? '');
+    isFetching: isJobsValidating,
+  } = useQuery(getJobs, { accountId: account?.id }, { enabled: !!account?.id });
 
   const jobs = jobsData?.jobs ?? [];
 
@@ -59,11 +72,10 @@ export default function RunsTable(props: RunsTableProps): ReactElement {
         onDeleted() {
           mutate();
         },
-        accountId: account?.id ?? '',
         accountName: account?.name ?? '',
         jobNameMap: jobNameMap,
       }),
-    [account?.id ?? '', account?.name ?? '', jobNameMap]
+    [account?.name ?? '', jobNameMap]
   );
 
   if (isLoading) {
@@ -79,17 +91,33 @@ export default function RunsTable(props: RunsTableProps): ReactElement {
 
   return (
     <div>
-      <DataTable
-        columns={columns}
-        data={runs}
-        refreshInterval={refreshInterval}
-        onAutoRefreshIntervalChange={(newVal: JobRunsAutoRefreshInterval) =>
-          setAutoRefreshInterval(newVal)
-        }
-        autoRefreshIntervalOptions={INTERVAL_SELECT_OPTIONS}
-        onRefreshClick={refreshClick}
-        isRefreshing={isValidating}
-      />
+      {runs.length == 0 ? (
+        <EmptyState
+          title="No Job Runs yet"
+          description="Runs are instances of a job that have been executed."
+          icon={<GoStack className="w-8 h-8 text-primary" />}
+          extra={
+            <EmptyStateLinkButton
+              buttonText="Trigger a Job to see a Run"
+              buttonIcon={<ArrowTopRightIcon />}
+              buttonIconSide="right"
+              href={`/${account?.name}/jobs`}
+            />
+          }
+        />
+      ) : (
+        <DataTable
+          columns={columns}
+          data={runs}
+          refreshInterval={refreshInterval}
+          onAutoRefreshIntervalChange={(newVal: JobRunsAutoRefreshInterval) =>
+            setAutoRefreshInterval(newVal)
+          }
+          autoRefreshIntervalOptions={INTERVAL_SELECT_OPTIONS}
+          onRefreshClick={refreshClick}
+          isRefreshing={isValidating}
+        />
+      )}
     </div>
   );
 }

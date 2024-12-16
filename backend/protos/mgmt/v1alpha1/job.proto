@@ -25,6 +25,9 @@ message JobSourceOptions {
     MysqlSourceConnectionOptions mysql = 3;
     GenerateSourceOptions generate = 4;
     AiGenerateSourceOptions ai_generate = 5;
+    MongoDBSourceConnectionOptions mongodb = 6;
+    DynamoDBSourceConnectionOptions dynamodb = 7;
+    MssqlSourceConnectionOptions mssql = 8;
   }
 }
 
@@ -40,21 +43,33 @@ message JobDestination {
 }
 
 message AiGenerateSourceOptions {
+  // The connection id that corresponds with an AI-based Neosync connection
   string ai_connection_id = 1 [(buf.validate.field).string.uuid = true];
+  // The list of schemas (and their tables) along with any configuration options that will be used to generate data for.
   repeated AiGenerateSourceSchemaOption schemas = 2 [(buf.validate.field).repeated.min_items = 1];
+  // An optional connection id that will be used as the basis for the shape of data to be generated.
   optional string fk_source_connection_id = 3 [(buf.validate.field).string.uuid = true];
   // The name of the model to use
   string model_name = 4 [(buf.validate.field).string.min_len = 1];
   // Optionally provide a user prompt to give more context to the schema
   optional string user_prompt = 5;
+  // The batch size that will be used to generate X number of records. This is global and will be applied to all tables configured.
+  optional int64 generate_batch_size = 6 [
+    (buf.validate.field).int64.gte = 1,
+    (buf.validate.field).int64.lte = 100
+  ];
 }
 
 message AiGenerateSourceSchemaOption {
+  // The dataabase schema
   string schema = 1 [(buf.validate.field).string.min_len = 1];
+  // The list of tables (and their configuration) that reside within the schema to receive generated data
   repeated AiGenerateSourceTableOption tables = 2 [(buf.validate.field).repeated.min_items = 1];
 }
 message AiGenerateSourceTableOption {
+  // The table that will be used to. 1. The schema of the table will be injected into the prompt, of which the resulting data will then be inserted.
   string table = 1 [(buf.validate.field).string.min_len = 1];
+  // The total number of records to be generated.
   int64 row_count = 2 [
     (buf.validate.field).int64.gte = 1,
     (buf.validate.field).int64.lte = 1000
@@ -74,11 +89,69 @@ message GenerateSourceTableOption {
   int64 row_count = 2 [(buf.validate.field).int64.gte = 1];
 }
 
+// MongoDB connection options for a job source
+message MongoDBSourceConnectionOptions {
+  // The unique connection id to a mongo connection configuration
+  string connection_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+// DynamoDB connection options for a job source
+message DynamoDBSourceConnectionOptions {
+  // The unique connection id to a dynamodb connection configuration
+  string connection_id = 1 [(buf.validate.field).string.uuid = true];
+  // List of table option configurations for any mapped source table.
+  // Any table listed in this must also be present as a job mapping table to be applied.
+  repeated DynamoDBSourceTableOption tables = 2;
+  // Default transformations for any unmapped keys
+  DynamoDBSourceUnmappedTransformConfig unmapped_transforms = 3;
+  // Enforces strong read consistency
+  // False: Eventually Consistent Reads, True: Strongly Consistent Reads
+  // https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html
+  bool enable_consistent_read = 4;
+}
+
+message DynamoDBSourceUnmappedTransformConfig {
+  // Byte
+  JobMappingTransformer b = 1;
+  // Boolean
+  JobMappingTransformer boolean = 2;
+  // Number
+  JobMappingTransformer n = 4;
+  // String
+  JobMappingTransformer s = 6;
+}
+
+message DynamoDBSourceTableOption {
+  // The table that this configuration will be applied to
+  string table = 1 [(buf.validate.field).string.min_len = 1];
+  // An optional PartiQL query that may be used for subsetting the DynamoDB table.
+  // This is not a parameterized query and must be valid. Intended to be everything after the WHERE keyword.
+  optional string where_clause = 2;
+}
+
 message PostgresSourceConnectionOptions {
-  bool halt_on_new_column_addition = 1;
+  // @deprecated - Use new_column_addition_strategy instead
+  optional bool halt_on_new_column_addition = 1;
   repeated PostgresSourceSchemaOption schemas = 2;
   string connection_id = 3 [(buf.validate.field).string.uuid = true];
   bool subset_by_foreign_key_constraints = 4;
+  // Provide a strategy of what to do in the event Neosync encounters an unmapped column for the job's mapped tables.
+  NewColumnAdditionStrategy new_column_addition_strategy = 5;
+
+  message NewColumnAdditionStrategy {
+    oneof strategy {
+      // halt job if a new column is detected. This is equiavlent to the deprecated halt_on_new_column_addition
+      HaltJob halt_job = 1;
+      // automatically handle unmapped columns. It handles this by using the DBs default/nullable values.
+      // If this doesn't exist, will fall back to configuring generators for supported datatypes.
+      // If none of the criteria above can be met, the job run will fail to prevent leaking of PII.
+      AutoMap auto_map = 2;
+    }
+    // Configuration for the HaltJob strategy
+    message HaltJob {}
+    // Configuration for the AutoMap strategy
+    message AutoMap {}
+  }
 }
 
 message PostgresSourceSchemaOption {
@@ -106,6 +179,22 @@ message MysqlSourceTableOption {
   optional string where_clause = 2;
 }
 
+message MssqlSourceConnectionOptions {
+  bool halt_on_new_column_addition = 1;
+  repeated MssqlSourceSchemaOption schemas = 2;
+  string connection_id = 3 [(buf.validate.field).string.uuid = true];
+  bool subset_by_foreign_key_constraints = 4;
+}
+
+message MssqlSourceSchemaOption {
+  string schema = 1;
+  repeated MssqlSourceTableOption tables = 2;
+}
+message MssqlSourceTableOption {
+  string table = 1;
+  optional string where_clause = 2;
+}
+
 message AwsS3SourceConnectionOptions {
   string connection_id = 1 [(buf.validate.field).string.uuid = true];
 }
@@ -116,13 +205,45 @@ message JobDestinationOptions {
     PostgresDestinationConnectionOptions postgres_options = 1;
     AwsS3DestinationConnectionOptions aws_s3_options = 2;
     MysqlDestinationConnectionOptions mysql_options = 3;
+    MongoDBDestinationConnectionOptions mongodb_options = 4;
+    // Destination Connecton options for Google Cloud Storage
+    GcpCloudStorageDestinationConnectionOptions gcp_cloudstorage_options = 5;
+    // Destination Connection options for DynamoDB
+    DynamoDBDestinationConnectionOptions dynamodb_options = 6;
+    // Destination Connection options for Microsoft SQL Server
+    MssqlDestinationConnectionOptions mssql_options = 7;
   }
+}
+
+message MongoDBDestinationConnectionOptions {}
+
+// Configuration for Google Cloud Storage Destination Connection Job Options
+message GcpCloudStorageDestinationConnectionOptions {}
+
+// Configuration for DynamoDB Destination Connection Job Options
+message DynamoDBDestinationConnectionOptions {
+  // List of table mappings when piping data from a dynamoDB table to another dynamoDB table
+  repeated DynamoDBDestinationTableMapping table_mappings = 1;
+}
+
+// Configuration for mapping a source table to a destination table for DynamoDB
+message DynamoDBDestinationTableMapping {
+  // The name of the incoming source table
+  string source_table = 1;
+  // The name of the outgoing destination table
+  string destination_table = 2;
 }
 
 message PostgresDestinationConnectionOptions {
   PostgresTruncateTableConfig truncate_table = 1;
   bool init_table_schema = 2;
   PostgresOnConflictConfig on_conflict = 3;
+  // Insert all valid records, skipping any that violate foreign key constraints.
+  bool skip_foreign_key_violations = 4;
+  // Configure batching options to handle how much data is sent to your database at once.
+  BatchConfig batch = 5;
+  // Determines the maximum number of parallel batched inserts.
+  optional uint32 max_in_flight = 6 [(buf.validate.field).uint32 = {gte: 1}];
 }
 
 message PostgresOnConflictConfig {
@@ -138,6 +259,12 @@ message MysqlDestinationConnectionOptions {
   MysqlTruncateTableConfig truncate_table = 1;
   bool init_table_schema = 2;
   MysqlOnConflictConfig on_conflict = 3;
+  // Insert all valid records, skipping any that violate foreign key constraints.
+  bool skip_foreign_key_violations = 4;
+  // Configure batching options to handle how much data is sent to your database at once.
+  BatchConfig batch = 5;
+  // Determines the maximum number of parallel batched inserts.
+  optional uint32 max_in_flight = 6 [(buf.validate.field).uint32 = {gte: 1}];
 }
 message MysqlTruncateTableConfig {
   bool truncate_before_insert = 1;
@@ -146,13 +273,61 @@ message MysqlOnConflictConfig {
   bool do_nothing = 1;
 }
 
-message AwsS3DestinationConnectionOptions {}
+message MssqlDestinationConnectionOptions {
+  MssqlTruncateTableConfig truncate_table = 1;
+  // Currently not supported and a placeholder for future implementation
+  bool init_table_schema = 2;
+  // Currently not supported and a placeholder for future implementation
+  MssqlOnConflictConfig on_conflict = 3;
+  // Insert all valid records, skipping any that violate foreign key constraints.
+  bool skip_foreign_key_violations = 4;
+  // Configure batching options to handle how much data is sent to your database at once.
+  BatchConfig batch = 5;
+  // Determines the maximum number of parallel batched inserts.
+  optional uint32 max_in_flight = 6 [(buf.validate.field).uint32 = {gte: 1}];
+}
+message MssqlTruncateTableConfig {
+  bool truncate_before_insert = 1;
+}
+message MssqlOnConflictConfig {
+  bool do_nothing = 1;
+}
+
+message AwsS3DestinationConnectionOptions {
+  // The storage class that will be used when objects are written to S3
+  StorageClass storage_class = 1;
+  // The maximum number of batched messages to have in flight at a given time. Increase this to improve throughput.
+  optional uint32 max_in_flight = 2 [(buf.validate.field).uint32 = {gte: 1}];
+  // The maximum period (duration string) to wait on an upload before abandoning it and reattempting.
+  optional string timeout = 3;
+  // Configure batching options to more efficiently store records in S3
+  BatchConfig batch = 4;
+
+  enum StorageClass {
+    STORAGE_CLASS_UNSPECIFIED = 0;
+    STORAGE_CLASS_STANDARD = 1;
+    STORAGE_CLASS_REDUCED_REDUNDANCY = 2;
+    STORAGE_CLASS_GLACIER = 3;
+    STORAGE_CLASS_STANDARD_IA = 4;
+    STORAGE_CLASS_ONEZONE_IA = 5;
+    STORAGE_CLASS_INTELLIGENT_TIERING = 6;
+    STORAGE_CLASS_DEEP_ARCHIVE = 7;
+  }
+}
+
+message BatchConfig {
+  // The max allowed in a batch before it is flushed. 0 to disable.
+  optional uint32 count = 1;
+  // A duration string in which an incomplete batch should be flushed regardless of the count.
+  // Examples are 1s, 1m, 500ms
+  optional string period = 2;
+}
 
 message CreateJobRequest {
   // The unique account identifier that this job will be associated with
   string account_id = 1 [(buf.validate.field).string.uuid = true];
   // The unique, friendly name of the job. This is unique per account
-  string job_name = 2 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,30}$"];
+  string job_name = 2 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,100}$"];
   // Optionally provide a cron schedule. Goes into effect if the job status is set to enabled
   optional string cron_schedule = 3;
   repeated JobMapping mappings = 4;
@@ -168,6 +343,10 @@ message CreateJobRequest {
   // Data sync activities are any piece of work that involves actually synchronizing data from a source to a destination
   // For the data sync and generate jobs, this will be applied per table
   ActivityOptions sync_options = 9;
+  repeated VirtualForeignConstraint virtual_foreign_keys = 10;
+
+  // Specify and job hooks that should be created
+  // repeated NewJobHook hooks = 11;
 }
 
 // Config that contains various timeouts that are configured in the underlying temporal workflow
@@ -206,6 +385,7 @@ message CreateJobResponse {
 }
 
 message JobMappingTransformer {
+  // @deprecated - This is no longer used in favor just providing the TransformerConfig
   TransformerSource source = 1;
   TransformerConfig config = 3;
 }
@@ -252,6 +432,7 @@ message UpdateJobSourceConnectionRequest {
   string id = 1 [(buf.validate.field).string.uuid = true];
   JobSource source = 2;
   repeated JobMapping mappings = 3;
+  repeated VirtualForeignConstraint virtual_foreign_keys = 4;
 }
 message UpdateJobSourceConnectionResponse {
   Job job = 1;
@@ -265,17 +446,30 @@ message MysqlSourceSchemaSubset {
   repeated MysqlSourceSchemaOption mysql_schemas = 1;
 }
 
+message DynamoDBSourceSchemaSubset {
+  repeated DynamoDBSourceTableOption tables = 1;
+}
+
+message MssqlSourceSchemaSubset {
+  repeated MssqlSourceSchemaOption mssql_schemas = 1;
+}
+
 message JobSourceSqlSubetSchemas {
   oneof schemas {
     option (buf.validate.oneof).required = true;
     PostgresSourceSchemaSubset postgres_subset = 2;
     MysqlSourceSchemaSubset mysql_subset = 3;
+    DynamoDBSourceSchemaSubset dynamodb_subset = 4;
+    MssqlSourceSchemaSubset mssql_subset = 5;
   }
 }
 
 message SetJobSourceSqlConnectionSubsetsRequest {
+  // The unique identifier of the job to update subsets for
   string id = 1 [(buf.validate.field).string.uuid = true];
+  // The subset configuration
   JobSourceSqlSubetSchemas schemas = 2;
+  // Whether or not to have subsets follow foreign key constraints (for connections that support it)
   bool subset_by_foreign_key_constraints = 3;
 }
 message SetJobSourceSqlConnectionSubsetsResponse {
@@ -311,7 +505,7 @@ message DeleteJobRequest {
 message DeleteJobResponse {}
 
 message IsJobNameAvailableRequest {
-  string name = 1 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,30}$"];
+  string name = 1 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,100}$"];
   string account_id = 2 [(buf.validate.field).string.uuid = true];
 }
 message IsJobNameAvailableResponse {
@@ -375,6 +569,9 @@ message Job {
 
   // Specify timeouts and other workflow options for the underlying temporal workflow
   WorkflowOptions workflow_options = 13;
+
+  // Any virtual foreign keys that are configured as a part of this job
+  repeated VirtualForeignConstraint virtual_foreign_keys = 14;
 }
 
 message JobRecentRun {
@@ -584,6 +781,272 @@ message SetJobSyncOptionsResponse {
   Job job = 1;
 }
 
+message ValidateJobMappingsRequest {
+  // The unique account identifier that this job will be associated with
+  string account_id = 1 [(buf.validate.field).string.uuid = true];
+  repeated JobMapping mappings = 2;
+  string connection_id = 3;
+  repeated VirtualForeignConstraint virtual_foreign_keys = 4;
+}
+
+message ColumnError {
+  string schema = 1;
+  string table = 2;
+  string column = 3;
+  repeated string errors = 4;
+}
+
+message DatabaseError {
+  repeated string errors = 1;
+}
+message ValidateJobMappingsResponse {
+  repeated ColumnError column_errors = 1;
+  DatabaseError database_errors = 2;
+}
+
+message VirtualForeignKey {
+  string schema = 1;
+  string table = 2;
+  repeated string columns = 3;
+}
+
+message VirtualForeignConstraint {
+  string schema = 1;
+  string table = 2;
+  repeated string columns = 3;
+  VirtualForeignKey foreign_key = 4;
+}
+
+message RunContextKey {
+  // The Neosync Run ID
+  string job_run_id = 1 [(buf.validate.field).string.min_len = 1];
+  // An opaque identifier that will be used to store specific items
+  string external_id = 2 [(buf.validate.field).string.min_len = 1];
+  // The Neosync Account ID
+  string account_id = 3 [(buf.validate.field).string.min_len = 1];
+}
+
+message GetRunContextRequest {
+  RunContextKey id = 1;
+}
+
+message GetRunContextResponse {
+  bytes value = 1;
+}
+
+message SetRunContextRequest {
+  RunContextKey id = 1;
+  // An opaque value that is to be determined by the key
+  bytes value = 2;
+}
+message SetRunContextResponse {}
+
+message SetRunContextsRequest {
+  RunContextKey id = 1;
+  // An opaque value that is to be determined by the key
+  bytes value = 2;
+}
+message SetRunContextsResponse {}
+
+message JobHook {
+  // The unique identifier of this hook.
+  string id = 1;
+  // Name of the hook for display/reference.
+  string name = 2;
+  // Description of what this hook does.
+  string description = 3;
+  // The unique identifier of the job this hook belongs to.
+  string job_id = 4;
+
+  // Hook-type specific configuration.
+  JobHookConfig config = 5;
+
+  // The user that created this hook.
+  string created_by_user_id = 6;
+  // The time this hook was created.
+  google.protobuf.Timestamp created_at = 7;
+
+  // The user that last updated this hook.
+  string updated_by_user_id = 8;
+  // The last time this hook was updated.
+  google.protobuf.Timestamp updated_at = 9;
+
+  // Whether or not the hook is enabled.
+  bool enabled = 10;
+
+  // The priority of the hook (0-100). This determines the execution order. Lower values are higher priority (priority=0 is the highest).
+  // Tie Breaking is determined by the following: (priority, created_at, id) in ascending order.
+  uint32 priority = 11 [(buf.validate.field).uint32 = {
+    gte: 0
+    lte: 100
+  }];
+}
+
+message NewJobHook {
+  // Name of the hook for display/reference.
+  string name = 1 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,100}$"];
+  // Description of what this hook does.
+  string description = 2 [(buf.validate.field).string.min_len = 1];
+
+  // Hook-type specific configuration.
+  JobHookConfig config = 3;
+
+  // Whether or not the hook is enabled.
+  bool enabled = 4;
+
+  // The priority of the hook (0-100). This determines the execution order. Lower values are higher priority (priority=0 is the highest).
+  // Tie Breaking is determined by the following: (priority, created_at, id) in ascending order.
+  uint32 priority = 5 [(buf.validate.field).uint32 = {
+    gte: 0
+    lte: 100
+  }];
+}
+
+// Contains the specific hook type configurations.
+message JobHookConfig {
+  oneof config {
+    option (buf.validate.oneof).required = true;
+    // Configuration for SQL-specific hooks.
+    JobSqlHook sql = 5;
+  }
+
+  // Configuration for SQL-based hooks
+  message JobSqlHook {
+    // The SQL query to execute
+    string query = 1 [(buf.validate.field).string.min_len = 1];
+
+    // Unique identifier of the Neosync connection to run this hook for. Must be a connection id that is present in the job.
+    string connection_id = 2 [(buf.validate.field).string.uuid = true];
+
+    // The timing of when the hook will run
+    Timing timing = 3;
+
+    message Timing {
+      oneof timing {
+        option (buf.validate.oneof).required = true;
+        // A Pre-Sync timing.
+        // Will run before the first table sync.
+        // Will run before Truncation, if enabled.
+        // Will run before Schema Init, if enabled.
+        JobHookTimingPreSync pre_sync = 3;
+        // A Post-Sync timing. Will run after the last table sync.
+        JobHookTimingPostSync post_sync = 4;
+      }
+    }
+  }
+}
+
+// Configures the job hook to run before the first table sync.
+// Will run before Truncation, if enabled.
+// Will run before Schema Init, if enabled.
+message JobHookTimingPreSync {}
+
+// Configures the job hook to run after the last table sync.
+message JobHookTimingPostSync {}
+
+message GetJobHooksRequest {
+  // The unique identifier of the job
+  string job_id = 1 [(buf.validate.field).string.uuid = true];
+}
+message GetJobHooksResponse {
+  // The list of hooks found attached to the job
+  repeated JobHook hooks = 1;
+}
+
+message GetJobHookRequest {
+  // The unique identifier of the hook
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+message GetJobHookResponse {
+  // The found hook
+  JobHook hook = 1;
+}
+
+message CreateJobHookRequest {
+  // The unique identifier of the job
+  string job_id = 1;
+  // The new hook configuration
+  NewJobHook hook = 2;
+}
+message CreateJobHookResponse {
+  // The newly created hook
+  JobHook hook = 1;
+}
+
+message DeleteJobHookRequest {
+  // The unique identifier of the hook
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+message DeleteJobHookResponse {}
+
+message IsJobHookNameAvailableRequest {
+  // The unique identifier of the job
+  string job_id = 1;
+  // The hook name to check.
+  string name = 2;
+}
+message IsJobHookNameAvailableResponse {
+  // Whether or not the hook name is available
+  bool is_available = 1;
+}
+
+message UpdateJobHookRequest {
+  // The unique identifier of the hook
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Name of the hook for display/reference.
+  string name = 2 [(buf.validate.field).string.pattern = "^[a-z0-9-]{3,100}$"];
+  // Description of what this hook does.
+  string description = 3 [(buf.validate.field).string.min_len = 1];
+
+  // Hook-type specific configuration.
+  JobHookConfig config = 4;
+  // Whether or not the hook is enabled.
+  bool enabled = 5;
+
+  // The priority of the hook (0-100). This determines the execution order. Lower values are higher priority (priority=0 is the highest).
+  // Tie Breaking is determined by the following: (priority, created_at, id) in ascending order.
+  uint32 priority = 6 [(buf.validate.field).uint32 = {
+    gte: 0
+    lte: 100
+  }];
+}
+message UpdateJobHookResponse {
+  // The updated job hook
+  JobHook hook = 1;
+}
+
+message SetJobHookEnabledRequest {
+  // The unique identifier of the hook
+  string id = 1 [(buf.validate.field).string.uuid = true];
+  // Whether or not the hook is enabled.
+  bool enabled = 2;
+}
+message SetJobHookEnabledResponse {
+  // The updated job hook
+  JobHook hook = 1;
+}
+
+message GetActiveJobHooksByTimingRequest {
+  // The unique identifier of the job
+  string job_id = 1 [(buf.validate.field).string.uuid = true];
+  // The timing desired.
+  Timing timing = 2;
+
+  enum Timing {
+    // If unspecified, returns all active job hooks
+    TIMING_UNSPECIFIED = 0;
+    // Only returns presync hooks
+    TIMING_PRESYNC = 1;
+    // Only returns postsync hooks
+    TIMING_POSTSYNC = 2;
+  }
+}
+message GetActiveJobHooksByTimingResponse {
+  // The active job hooks
+  repeated JobHook hooks = 1;
+}
+
 service JobService {
   rpc GetJobs(GetJobsRequest) returns (GetJobsResponse) {}
   rpc GetJob(GetJobRequest) returns (GetJobResponse) {}
@@ -619,4 +1082,30 @@ service JobService {
   rpc SetJobWorkflowOptions(SetJobWorkflowOptionsRequest) returns (SetJobWorkflowOptionsResponse) {}
   // Set the job sync options. Must provide entire object as it will fully override the previous configuration
   rpc SetJobSyncOptions(SetJobSyncOptionsRequest) returns (SetJobSyncOptionsResponse) {}
+  // validates that the jobmapping configured can run with table constraints
+  rpc ValidateJobMappings(ValidateJobMappingsRequest) returns (ValidateJobMappingsResponse) {}
+
+  // Gets a run context to be used by a workflow run
+  rpc GetRunContext(GetRunContextRequest) returns (GetRunContextResponse) {}
+  // Sets a run context to be used by a workflow run
+  rpc SetRunContext(SetRunContextRequest) returns (SetRunContextResponse) {}
+  // Sets a stream of run contexts to be used by a workflow run
+  rpc SetRunContexts(stream SetRunContextsRequest) returns (SetRunContextsResponse) {}
+
+  // Retrieves all job hooks
+  rpc GetJobHooks(GetJobHooksRequest) returns (GetJobHooksResponse) {}
+  // Retrieves a specific job hook
+  rpc GetJobHook(GetJobHookRequest) returns (GetJobHookResponse) {}
+  // Creates a new job hook
+  rpc CreateJobHook(CreateJobHookRequest) returns (CreateJobHookResponse) {}
+  // Removes a job hook
+  rpc DeleteJobHook(DeleteJobHookRequest) returns (DeleteJobHookResponse) {}
+  // Check if a specific job hook name is available
+  rpc IsJobHookNameAvailable(IsJobHookNameAvailableRequest) returns (IsJobHookNameAvailableResponse) {}
+  // Updates a job hook
+  rpc UpdateJobHook(UpdateJobHookRequest) returns (UpdateJobHookResponse) {}
+  // Enables or disables a job hook
+  rpc SetJobHookEnabled(SetJobHookEnabledRequest) returns (SetJobHookEnabledResponse) {}
+  // Returns job hooks that are enabled by a specific timing. They will be sorted by priority, created_at, and id ascending.
+  rpc GetActiveJobHooksByTiming(GetActiveJobHooksByTimingRequest) returns (GetActiveJobHooksByTimingResponse) {}
 }

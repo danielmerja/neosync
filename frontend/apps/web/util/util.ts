@@ -1,10 +1,19 @@
+import { TransformerHandler } from '@/components/jobs/SchemaTable/transformer-handler';
+import { Transformer } from '@/shared/transformers';
+import { JobMappingTransformerForm } from '@/yup-validations/jobs';
 import {
+  AwsS3DestinationConnectionOptions_StorageClass,
   GenerateEmailType,
+  GenerateIpAddressType,
+  InvalidEmailAction,
   SupportedJobType,
+  SystemTransformer,
   TransformerDataType,
   TransformerSource,
+  UserDefinedTransformer,
 } from '@neosync/sdk';
 import { format } from 'date-fns';
+import { useMemo } from 'react';
 
 export function formatDateTime(
   dateStr?: string | Date | number,
@@ -13,9 +22,17 @@ export function formatDateTime(
   if (!dateStr) {
     return undefined;
   }
+
+  // checks to make sure that the string can be transformed into a valid date
+  const date = new Date(dateStr);
+
+  if (isNaN(date.getTime())) {
+    return undefined;
+  }
+
   const hourFormat = is24Hour ? 'HH' : 'hh';
-  const amPm = is24Hour ? '' : 'a';
-  return format(new Date(dateStr), `MM/dd/yyyy ${hourFormat}:mm:ss ${amPm}`);
+  const amPm = is24Hour ? '' : ' a';
+  return format(new Date(dateStr), `MM/dd/yyyy ${hourFormat}:mm:ss${amPm}`);
 }
 
 export function formatDateTimeMilliseconds(
@@ -25,18 +42,24 @@ export function formatDateTimeMilliseconds(
   if (!dateStr) {
     return undefined;
   }
-  const hourFormat = is24Hour ? 'HH' : 'hh';
-  const amPm = is24Hour ? '' : 'a';
 
-  return format(
-    new Date(dateStr),
-    `MM/dd/yyyy ${hourFormat}:mm:ss:SSS ${amPm}`
-  );
+  // checks to make sure that the string can be transformed into a valid date
+  const date = new Date(dateStr);
+
+  if (isNaN(date.getTime())) {
+    return undefined;
+  }
+
+  const hourFormat = is24Hour ? 'HH' : 'hh';
+  const amPm = is24Hour ? '' : ' a';
+
+  return format(new Date(dateStr), `MM/dd/yyyy ${hourFormat}:mm:ss:SSS${amPm}`);
 }
 
 export function getErrorMessage(error: unknown): string {
   return isErrorWithMessage(error) ? error.message : 'unknown error message';
 }
+
 function isErrorWithMessage(error: unknown): error is { message: string } {
   return (
     typeof error === 'object' &&
@@ -110,16 +133,80 @@ export function getGenerateEmailTypeString(
   return value ? value.toLowerCase() : 'unknown';
 }
 
-// This expects the fully qualified proto email that looks like this: GENERATE_EMAIL_TYPE_FULLNAME
-// This is because the form deals with the TransformConfig that is jsonified and contains the wired value instead of the int value.
-// There seems to be no easy way to convert between the two
-export function generateEmailTypeStringToEnum(
-  emailType: string
-): GenerateEmailType {
-  switch (emailType) {
-    case 'GENERATE_EMAIL_TYPE_FULLNAME':
-      return GenerateEmailType.FULLNAME;
-    default:
-      return GenerateEmailType.UUID_V4;
+export function getInvalidEmailActionString(
+  invalidEmailAction: InvalidEmailAction
+): string {
+  const value = InvalidEmailAction[invalidEmailAction];
+  return value ? value.toLowerCase() : 'unknown';
+}
+
+export function getStorageClassString(
+  storageclass: AwsS3DestinationConnectionOptions_StorageClass
+): string {
+  const value = AwsS3DestinationConnectionOptions_StorageClass[storageclass];
+  return value ? value.toLowerCase() : 'unknown';
+}
+
+// Given the currently selected transformer mapping config, return the relevant Transformer
+export function getTransformerFromField(
+  handler: TransformerHandler,
+  value: JobMappingTransformerForm
+): Transformer {
+  if (value.config.case === 'userDefinedTransformerConfig') {
+    return (
+      handler.getUserDefinedTransformerById(value.config.value.id) ??
+      new SystemTransformer()
+    );
   }
+  return (
+    handler.getSystemTransformerByConfigCase(value.config.case) ??
+    new SystemTransformer()
+  );
+}
+
+// Checks to see if the config is unspecified
+export function isInvalidTransformer(transformer: Transformer): boolean {
+  return transformer.config == null;
+}
+
+export function useTransformerSelectButtonText(
+  transformer: Transformer,
+  defaultText: string = 'Select Transformer'
+): string {
+  return useMemo(
+    () => getTransformerSelectButtonText(transformer, defaultText),
+    [transformer.name, defaultText, transformer.config]
+  );
+}
+
+export function getTransformerSelectButtonText(
+  transformer: Transformer,
+  defaultText: string = 'Transformer'
+): string {
+  return isInvalidTransformer(transformer) ? defaultText : transformer.name;
+}
+
+export function getFilterdTransformersByType(
+  transformerHandler: TransformerHandler,
+  datatype: TransformerDataType
+): {
+  system: SystemTransformer[];
+  userDefined: UserDefinedTransformer[];
+} {
+  return transformerHandler.getFilteredTransformers({
+    isForeignKey: false,
+    isVirtualForeignKey: false,
+    hasDefault: false,
+    isNullable: true,
+    isGenerated: false,
+    dataType: datatype,
+    jobType: SupportedJobType.SYNC,
+  });
+}
+
+export function getGenerateIpAddressVersionString(
+  type: GenerateIpAddressType
+): string {
+  const value = GenerateIpAddressType[type];
+  return value ? value.toLowerCase() : 'unknown';
 }

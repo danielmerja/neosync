@@ -30,82 +30,80 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetAccountApiKey } from '@/libs/hooks/useGetAccountApiKey';
 import { cn } from '@/libs/utils';
 import { getErrorMessage } from '@/util/util';
+import { RegenerateApiKeyForm } from '@/yup-validations/apikey';
 import { Timestamp } from '@bufbuild/protobuf';
-import { yupResolver } from '@hookform/resolvers/yup';
 import {
-  GetAccountApiKeyResponse,
-  RegenerateAccountApiKeyRequest,
-  RegenerateAccountApiKeyResponse,
-} from '@neosync/sdk';
+  createConnectQueryKey,
+  useMutation,
+  useQuery,
+} from '@connectrpc/connect-query';
+import { yupResolver } from '@hookform/resolvers/yup';
+import { GetAccountApiKeyResponse } from '@neosync/sdk';
+import {
+  getAccountApiKey,
+  regenerateAccountApiKey,
+} from '@neosync/sdk/connectquery';
 import { CalendarIcon } from '@radix-ui/react-icons';
+import { useQueryClient } from '@tanstack/react-query';
 import { addDays, endOfDay, format, startOfDay } from 'date-fns';
 import Error from 'next/error';
 import { useRouter } from 'next/navigation';
 import { ReactElement } from 'react';
 import { useForm } from 'react-hook-form';
-import { mutate } from 'swr';
-import * as Yup from 'yup';
-
-const FORM_SCHEMA = Yup.object({
-  expiresAtSelect: Yup.string().oneOf(['7', '30', '60', '90', 'custom']),
-  expiresAt: Yup.date().required(),
-});
-type FormValues = Yup.InferType<typeof FORM_SCHEMA>;
+import { toast } from 'sonner';
 
 export default function RegenerateAccountApiKey({
   params,
 }: PageProps): ReactElement {
   const id = params?.id ?? '';
-  const { toast } = useToast();
   const router = useRouter();
   const { account } = useAccount();
-  const { data, isLoading } = useGetAccountApiKey(account?.id ?? '', id);
+  const { data, isLoading } = useQuery(
+    getAccountApiKey,
+    { id },
+    { enabled: !!id }
+  );
+  const { mutateAsync } = useMutation(regenerateAccountApiKey);
+  const queryclient = useQueryClient();
 
-  const form = useForm<FormValues>({
-    resolver: yupResolver(FORM_SCHEMA),
+  const form = useForm<RegenerateApiKeyForm>({
+    resolver: yupResolver(RegenerateApiKeyForm),
     defaultValues: {
       expiresAtSelect: '7',
       expiresAt: startOfDay(addDays(new Date(), 7)),
     },
   });
 
-  async function onSubmit(values: FormValues): Promise<void> {
+  async function onSubmit(values: RegenerateApiKeyForm): Promise<void> {
     if (!id) {
       return;
     }
     try {
-      const updatedApiKey = await regenerateApiKey(
-        values,
-        account?.id ?? '',
-        id
-      );
+      const updatedApiKey = await mutateAsync({
+        id,
+        expiresAt: new Timestamp({
+          seconds: BigInt(values.expiresAt.getTime() / 1000),
+        }),
+      });
       if (updatedApiKey.apiKey?.keyValue && !!window?.sessionStorage) {
         const storeVal: ApiKeyValueSessionStore = {
           keyValue: updatedApiKey.apiKey.keyValue,
         };
         window.sessionStorage.setItem(id, JSON.stringify(storeVal));
       }
-      router.push(`/${account?.name}/settings/api-keys/${id}`);
-      mutate(
-        `/api/accounts/${account?.id}/api-keys/${id}`,
-        new GetAccountApiKeyResponse({
-          apiKey: updatedApiKey.apiKey,
-        })
+      const key = createConnectQueryKey(getAccountApiKey, { id });
+      queryclient.setQueryData(
+        key,
+        new GetAccountApiKeyResponse({ apiKey: updatedApiKey.apiKey })
       );
-      toast({
-        title: 'Successfully regenerated api key!',
-        variant: 'success',
-      });
+      router.push(`/${account?.name}/settings/api-keys/${id}`);
+      toast.success('Successfully regenerated api key!');
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to regenerate api key!',
+      toast.error('Unable to regenerate api key!', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -255,33 +253,4 @@ export default function RegenerateAccountApiKey({
       </Form>
     </OverviewContainer>
   );
-}
-
-async function regenerateApiKey(
-  formData: FormValues,
-  accountId: string,
-  keyId: string
-): Promise<RegenerateAccountApiKeyResponse> {
-  const body = new RegenerateAccountApiKeyRequest({
-    id: keyId,
-    expiresAt: new Timestamp({
-      seconds: BigInt(formData.expiresAt.getTime() / 1000),
-    }),
-  });
-
-  const res = await fetch(
-    `/api/accounts/${accountId}/api-keys/${keyId}/regenerate`,
-    {
-      method: 'PUT',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return RegenerateAccountApiKeyResponse.fromJson(await res.json());
 }

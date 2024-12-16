@@ -19,11 +19,15 @@ import { yupResolver } from '@hookform/resolvers/yup';
 import { useRouter } from 'next/navigation';
 import { ReactElement, useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import useFormPersist from 'react-hook-form-persist';
 import { useSessionStorage } from 'usehooks-ts';
 import JobsProgressSteps, { getJobProgressSteps } from '../JobsProgressSteps';
-import { DEFINE_FORM_SCHEMA, DefineFormValues, NewJobType } from '../schema';
+import {
+  DefineFormValues,
+  DefineFormValuesContext,
+  NewJobType,
+} from '../job-form-validations';
 
+import FormPersist from '@/app/(mgmt)/FormPersist';
 import {
   Accordion,
   AccordionContent,
@@ -33,9 +37,11 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { getSingleOrUndefined } from '@/libs/utils';
+import { useMutation } from '@connectrpc/connect-query';
+import { isJobNameAvailable } from '@neosync/sdk/connectquery';
+import { usePostHog } from 'posthog-js/react';
 import { DEFAULT_CRON_STRING } from '../../../jobs/[id]/components/ScheduleCard';
-
-const isBrowser = () => typeof window !== 'undefined';
+import { getNewJobSessionKeys } from '../../../jobs/util';
 
 export default function Page({ searchParams }: PageProps): ReactElement {
   const router = useRouter();
@@ -46,45 +52,51 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     }
   }, [searchParams?.sessionId]);
 
-  const sessionPrefix = searchParams?.sessionId ?? '';
-  const [defaultValues] = useSessionStorage<DefineFormValues>(
-    `${sessionPrefix}-new-job-define`,
-    {
-      jobName: '',
-      cronSchedule: '',
-      initiateJobRun: false,
-      workflowSettings: {},
-      syncActivityOptions: {
-        startToCloseTimeout: 10,
-        retryPolicy: {
-          maximumAttempts: 1,
-        },
+  const sessionPrefix = getSingleOrUndefined(searchParams?.sessionId) ?? '';
+  const sessionKeys = getNewJobSessionKeys(sessionPrefix);
+
+  const formKey = sessionKeys.global.define;
+  const [defaultValues] = useSessionStorage<DefineFormValues>(formKey, {
+    jobName: '',
+    cronSchedule: '',
+    initiateJobRun: false,
+    workflowSettings: {},
+    syncActivityOptions: {
+      startToCloseTimeout: 10,
+      retryPolicy: {
+        maximumAttempts: 1,
       },
-    }
-  );
+    },
+  });
   const [isScheduleEnabled, setIsScheduleEnabled] = useState<boolean>(false);
 
-  const form = useForm<DefineFormValues>({
+  // run once to check if schedule should be enabled. (only want to run this a single time)
+  useEffect(() => {
+    if (defaultValues.cronSchedule && !isScheduleEnabled) {
+      setIsScheduleEnabled(true);
+    }
+  }, []);
+
+  const { mutateAsync: isJobNameAvailableAsync } =
+    useMutation(isJobNameAvailable);
+  const form = useForm<DefineFormValues, DefineFormValuesContext>({
     mode: 'onChange',
-    resolver: yupResolver<DefineFormValues>(DEFINE_FORM_SCHEMA),
+    resolver: yupResolver<DefineFormValues>(DefineFormValues),
     defaultValues,
     context: {
       accountId: account?.id ?? '',
+      isJobNameAvailable: isJobNameAvailableAsync,
     },
   });
 
-  useFormPersist(`${sessionPrefix}-new-job-define`, {
-    watch: form.watch,
-    setValue: form.setValue,
-    storage: isBrowser() ? window.sessionStorage : undefined,
-  });
-
   const newJobType = getNewJobType(getSingleOrUndefined(searchParams?.jobType));
+  const posthog = usePostHog();
 
   async function onSubmit(_values: DefineFormValues) {
     if (!isScheduleEnabled) {
       form.setValue('cronSchedule', '');
     }
+    posthog.capture('New Job Flow Define Complete', { jobType: newJobType });
     if (newJobType === 'generate-table') {
       router.push(
         `/${account?.name}/new/job/generate/single/connect?sessionId=${sessionPrefix}`
@@ -105,6 +117,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       id="newjobdefine"
       className="px-12 md:px-24 lg:px-48 xl:px-64 flex flex-col gap-5"
     >
+      <FormPersist formKey={formKey} form={form} />
       <OverviewContainer
         Header={
           <PageHeader
@@ -122,7 +135,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
         <div />
       </OverviewContainer>
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+        <form onSubmit={form.handleSubmit(onSubmit)}>
           <FormField
             control={form.control}
             name="jobName"
@@ -208,7 +221,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
               </AccordionTrigger>
               <AccordionContent>
                 <Separator />
-                <div className="flex flex-col gap-6 pt-6">
+                <div className="flex flex-col pt-6 p-2">
                   <FormField
                     control={form.control}
                     name="workflowSettings.runTimeout"
@@ -234,7 +247,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
                       </FormItem>
                     )}
                   />
-                  <div className="flex flex-col gap-6">
+                  <div className="flex flex-col">
                     <FormField
                       control={form.control}
                       name="syncActivityOptions.startToCloseTimeout"
@@ -326,7 +339,7 @@ export default function Page({ searchParams }: PageProps): ReactElement {
               </AccordionContent>
             </AccordionItem>
           </Accordion>
-          <div className="flex flex-row justify-between">
+          <div className="flex flex-row justify-between pt-10 ">
             <Button
               variant="outline"
               type="reset"

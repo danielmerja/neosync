@@ -4,16 +4,23 @@ updates:
   - package-ecosystem: "gomod"
     schedule:
       interval: "daily"
+    labels:
+      - dependencies
+    directory: "/"
     groups:
       golang-minor:
         update-types:
           - minor
           - patch
+    reviewers:
+      - nickzelei
 
   - package-ecosystem: "npm"
     directory: "frontend"
     schedule:
       interval: "weekly"
+    labels:
+      - dependencies
     groups:
       npm-development:
         dependency-type: development
@@ -23,12 +30,18 @@ updates:
       npm-production:
         dependency-type: production
         update-types:
+          - minor
           - patch
+    reviewers:
+      - nickzelei
+    versioning-strategy: increase
 
   - package-ecosystem: "npm"
     directory: "docs"
     schedule:
       interval: "weekly"
+    labels:
+      - dependencies
     groups:
       npm-development:
         dependency-type: development
@@ -38,15 +51,22 @@ updates:
       npm-production:
         dependency-type: production
         update-types:
+          - minor
           - patch
+    reviewers:
+      - nickzelei
 
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    labels:
+      - dependencies
     groups:
       actions-minor:
         update-types:
           - minor
           - patch
+    reviewers:
+      - nickzelei

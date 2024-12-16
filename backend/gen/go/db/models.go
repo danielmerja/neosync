@@ -10,13 +10,15 @@ import (
 )
 
 type NeosyncApiAccount struct {
-	ID               pgtype.UUID
-	CreatedAt        pgtype.Timestamp
-	UpdatedAt        pgtype.Timestamp
-	AccountType      int16
-	AccountSlug      string
-	TemporalConfig   *pg_models.TemporalConfig
-	OnboardingConfig *pg_models.AccountOnboardingConfig
+	ID                pgtype.UUID
+	CreatedAt         pgtype.Timestamp
+	UpdatedAt         pgtype.Timestamp
+	AccountType       int16
+	AccountSlug       string
+	TemporalConfig    *pg_models.TemporalConfig
+	OnboardingConfig  *pg_models.AccountOnboardingConfig
+	MaxAllowedRecords pgtype.Int8
+	StripeCustomerID  pgtype.Text
 }
 
 type NeosyncApiAccountApiKey struct {
@@ -64,19 +66,20 @@ type NeosyncApiConnection struct {
 }
 
 type NeosyncApiJob struct {
-	ID                pgtype.UUID
-	CreatedAt         pgtype.Timestamp
-	UpdatedAt         pgtype.Timestamp
-	Name              string
-	AccountID         pgtype.UUID
-	Status            int16
-	ConnectionOptions *pg_models.JobSourceOptions
-	Mappings          []*pg_models.JobMapping
-	CronSchedule      pgtype.Text
-	CreatedByID       pgtype.UUID
-	UpdatedByID       pgtype.UUID
-	WorkflowOptions   *pg_models.WorkflowOptions
-	SyncOptions       *pg_models.ActivityOptions
+	ID                 pgtype.UUID
+	CreatedAt          pgtype.Timestamp
+	UpdatedAt          pgtype.Timestamp
+	Name               string
+	AccountID          pgtype.UUID
+	Status             int16
+	ConnectionOptions  *pg_models.JobSourceOptions
+	Mappings           []*pg_models.JobMapping
+	CronSchedule       pgtype.Text
+	CreatedByID        pgtype.UUID
+	UpdatedByID        pgtype.UUID
+	WorkflowOptions    *pg_models.WorkflowOptions
+	SyncOptions        *pg_models.ActivityOptions
+	VirtualForeignKeys []*pg_models.VirtualForeignConstraint
 }
 
 type NeosyncApiJobDestinationConnectionAssociation struct {
@@ -88,6 +91,34 @@ type NeosyncApiJobDestinationConnectionAssociation struct {
 	Options      *pg_models.JobDestinationOptions
 }
 
+// Stores hooks that can be configured to run as part of a job
+type NeosyncApiJobHook struct {
+	ID              pgtype.UUID
+	Name            string
+	Description     string
+	JobID           pgtype.UUID
+	Config          []byte
+	CreatedByUserID pgtype.UUID
+	CreatedAt       pgtype.Timestamptz
+	UpdatedByUserID pgtype.UUID
+	UpdatedAt       pgtype.Timestamptz
+	Enabled         bool
+	Priority        int32
+	HookTiming      pgtype.Text
+	ConnectionID    pgtype.UUID
+}
+
+type NeosyncApiRuncontext struct {
+	WorkflowID  string
+	ExternalID  string
+	AccountID   pgtype.UUID
+	Value       []byte
+	CreatedAt   pgtype.Timestamp
+	UpdatedAt   pgtype.Timestamp
+	CreatedByID pgtype.UUID
+	UpdatedByID pgtype.UUID
+}
+
 type NeosyncApiTransformer struct {
 	ID                pgtype.UUID
 	CreatedAt         pgtype.Timestamp
@@ -95,7 +126,7 @@ type NeosyncApiTransformer struct {
 	Name              string
 	Description       string
 	AccountID         pgtype.UUID
-	TransformerConfig *pg_models.TransformerConfigs
+	TransformerConfig *pg_models.TransformerConfig
 	CreatedByID       pgtype.UUID
 	UpdatedByID       pgtype.UUID
 	Source            int32

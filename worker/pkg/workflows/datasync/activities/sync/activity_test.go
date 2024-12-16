@@ -1,27 +1,116 @@
 package sync_activity
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+	"github.com/google/uuid"
+	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
+	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
+	"github.com/nucleuscloud/neosync/backend/pkg/sqlconnect"
+	connectionmanager "github.com/nucleuscloud/neosync/internal/connection-manager"
+	"github.com/nucleuscloud/neosync/internal/connection-manager/providers/mongoprovider"
+	"github.com/nucleuscloud/neosync/internal/connection-manager/providers/sqlprovider"
+	"github.com/nucleuscloud/neosync/internal/testutil"
+	"github.com/nucleuscloud/neosync/worker/pkg/workflows/datasync/activities/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/testsuite"
 )
 
-func Test_Sync_Run_Success(t *testing.T) {
+func Test_Sync_RunContext_Success(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+
+	mux := http.NewServeMux()
+	benthosConfig := strings.TrimSpace(`
+input:
+  generate:
+    count: 1
+    interval: ""
+    mapping: 'root = { "id": uuid_v4() }'
+output:
+  label: ""
+  stdout:
+    codec: lines
+`)
+	accountId := uuid.NewString()
+
+	mux.Handle(mgmtv1alpha1connect.JobServiceGetRunContextProcedure, connect.NewUnaryHandler(
+		mgmtv1alpha1connect.JobServiceGetRunContextProcedure,
+		func(ctx context.Context, r *connect.Request[mgmtv1alpha1.GetRunContextRequest]) (*connect.Response[mgmtv1alpha1.GetRunContextResponse], error) {
+			if r.Msg.GetId().GetAccountId() == accountId && r.Msg.GetId().GetExternalId() == shared.GetBenthosConfigExternalId("test") {
+				return connect.NewResponse(&mgmtv1alpha1.GetRunContextResponse{
+					Value: []byte(benthosConfig),
+				}), nil
+			}
+			return nil, errors.New("invalid test account id")
+		},
+	))
+	srv := startHTTPServer(t, mux)
+
+	jobclient := mgmtv1alpha1connect.NewJobServiceClient(srv.Client(), srv.URL)
+	connclient := mgmtv1alpha1connect.NewConnectionServiceClient(srv.Client(), srv.URL)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+
+	activity := New(connclient, jobclient, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
+
+	env.RegisterActivity(activity.Sync)
+
+	val, err := env.ExecuteActivity(activity.Sync, &SyncRequest{
+		AccountId: accountId,
+		Name:      "test",
+	}, &SyncMetadata{Schema: "public", Table: "test"})
+	require.NoError(t, err)
+	res := &SyncResponse{}
+	err = val.Get(res)
+	require.NoError(t, err)
+}
+
+func Test_Sync_Run_No_BenthosConfig(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
+	env := testSuite.NewTestActivityEnvironment()
+
+	benthosStreamManager := NewBenthosStreamManager()
+
+	activity := New(nil, nil, nil, nil, nil, benthosStreamManager)
+
+	env.RegisterActivity(activity.Sync)
+
+	val, err := env.ExecuteActivity(activity.Sync, &SyncRequest{}, &SyncMetadata{Schema: "public", Table: "test"})
+	require.Error(t, err)
+	require.Nil(t, val)
+}
+
+func Test_Sync_Run_Success(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
+	env := testSuite.NewTestActivityEnvironment()
+
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+
+	benthosStreamManager := NewBenthosStreamManager()
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 
@@ -46,12 +135,15 @@ output:
 
 func Test_Sync_Run_Metrics_Success(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	meterProvider := metricsdk.NewMeterProvider()
 	meter := meterProvider.Meter("test")
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, meter, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 
@@ -78,10 +170,14 @@ metrics:
 
 func Test_Sync_Fake_Mutation_Success(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 	env.RegisterActivity(activity.Sync)
 
 	val, err := env.ExecuteActivity(activity.Sync, &SyncRequest{
@@ -110,10 +206,15 @@ output:
 
 func Test_Sync_Run_Success_Javascript(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 	env.RegisterActivity(activity.Sync)
 
 	tmpFile, err := os.CreateTemp("", "test")
@@ -131,7 +232,7 @@ input:
     count: 1
 pipeline:
   processors:
-    - javascript:
+    - neosync_javascript:
         code: |
           (() => {
           function fn_name(value, input){
@@ -167,9 +268,13 @@ output:
 
 func Test_Sync_Run_Success_MutataionAndJavascript(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 	env.RegisterActivity(activity.Sync)
 
 	tmpFile, err := os.CreateTemp("", "test")
@@ -189,7 +294,7 @@ pipeline:
   processors:
     - mutation:
         root.name = this.name.reverse()
-    - javascript:
+    - neosync_javascript:
         code: |
           (() => {
           function fn1(value, input){
@@ -225,10 +330,14 @@ output:
 
 func Test_Sync_Run_Processor_Error(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 
@@ -255,11 +364,16 @@ output:
 
 func Test_Sync_Run_Output_Error(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	mockBenthosStreamManager := NewMockBenthosStreamManagerClient(t)
 	mockBenthosStream := NewMockBenthosStreamClient(t)
-	activity := New(nil, &sync.Map{}, nil, nil, mockBenthosStreamManager)
+
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, mockBenthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 
@@ -290,6 +404,7 @@ output:
 
 func Test_Sync_Run_ActivityStop_MockBenthos(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	mockBenthosStreamManager := NewMockBenthosStreamManagerClient(t)
@@ -310,7 +425,11 @@ output:
 	mockBenthosStream.On("Run", mock.Anything).After(5 * time.Second).Return(nil)
 	mockBenthosStream.On("StopWithin", mock.Anything).Return(nil)
 
-	activity := New(nil, &sync.Map{}, nil, nil, mockBenthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, mockBenthosStreamManager)
 	env.RegisterActivity(activity.Sync)
 
 	stopCh := make(chan struct{})
@@ -331,9 +450,13 @@ output:
 
 func Test_Sync_Run_ActivityWorkerStop(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 	benthosStreamManager := NewBenthosStreamManager()
-	activity := New(nil, &sync.Map{}, nil, nil, benthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, benthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 	stopCh := make(chan struct{})
@@ -354,8 +477,7 @@ input:
     mapping: 'root = { "id": uuid_v4() }'
 output:
   label: ""
-  stdout:
-    codec: lines
+  drop: {}
 `),
 	}, &SyncMetadata{Schema: "public", Table: "test"})
 	require.Error(t, err)
@@ -364,6 +486,7 @@ output:
 
 func Test_Sync_Run_BenthosError(t *testing.T) {
 	testSuite := &testsuite.WorkflowTestSuite{}
+	testSuite.SetLogger(log.NewStructuredLogger(testutil.GetConcurrentTestLogger(t)))
 	env := testSuite.NewTestActivityEnvironment()
 
 	mockBenthosStreamManager := NewMockBenthosStreamManagerClient(t)
@@ -385,7 +508,11 @@ output:
 	mockBenthosStream.On("Run", mock.Anything).Return(errors.New(errmsg))
 	mockBenthosStream.On("StopWithin", mock.Anything).Return(nil).Maybe()
 
-	activity := New(nil, &sync.Map{}, nil, nil, mockBenthosStreamManager)
+	sqlconnmanager := connectionmanager.NewConnectionManager(sqlprovider.NewProvider(&sqlconnect.SqlOpenConnector{}), connectionmanager.WithCloseOnRelease())
+	mongoconnmanager := connectionmanager.NewConnectionManager(mongoprovider.NewProvider(), connectionmanager.WithCloseOnRelease())
+	var meter metric.Meter
+
+	activity := New(nil, nil, sqlconnmanager, mongoconnmanager, meter, mockBenthosStreamManager)
 
 	env.RegisterActivity(activity.Sync)
 	_, err := env.ExecuteActivity(activity.Sync, &SyncRequest{
@@ -413,18 +540,11 @@ func Test_getEnvVarLookupFn(t *testing.T) {
 	assert.Empty(t, val)
 }
 
-func Test_syncMapToStringMap(t *testing.T) {
-	syncmap := sync.Map{}
-
-	syncmap.Store("foo", "bar")
-	syncmap.Store("bar", "baz")
-	syncmap.Store(1, "2")
-	syncmap.Store("3", 4)
-
-	out := syncMapToStringMap(&syncmap)
-	assert.Len(t, out, 2)
-	assert.Equal(t, out["foo"], "bar")
-	assert.Equal(t, out["bar"], "baz")
-
-	assert.Empty(t, syncMapToStringMap(nil))
+func startHTTPServer(tb testing.TB, h http.Handler) *httptest.Server {
+	tb.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.EnableHTTP2 = true
+	srv.Start()
+	tb.Cleanup(srv.Close)
+	return srv
 }

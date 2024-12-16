@@ -3,10 +3,8 @@ package authlogging_interceptor
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -18,18 +16,19 @@ import (
 	auth_apikey "github.com/nucleuscloud/neosync/backend/internal/auth/apikey"
 	auth_jwt "github.com/nucleuscloud/neosync/backend/internal/auth/jwt"
 	logger_interceptor "github.com/nucleuscloud/neosync/backend/internal/connect/interceptors/logger"
-	"github.com/nucleuscloud/neosync/backend/internal/nucleusdb"
+	"github.com/nucleuscloud/neosync/backend/internal/neosyncdb"
+	"github.com/nucleuscloud/neosync/internal/testutil"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 func Test_Interceptor_WrapUnary_JwtContextData_ValidUser(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := testutil.GetTestLogger(t)
 
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
-	genuuid, _ := nucleusdb.ToUuid(uuid.NewString())
+	genuuid, _ := neosyncdb.ToUuid(uuid.NewString())
 	mockQuerier.On("GetUserByProviderSub", mock.Anything, mock.Anything, "auth-user-id").
 		Return(db_queries.NeosyncApiUser{ID: genuuid}, nil)
 
@@ -42,7 +41,7 @@ func Test_Interceptor_WrapUnary_JwtContextData_ValidUser(t *testing.T) {
 		connect.WithInterceptors(
 			logger_interceptor.NewInterceptor(logger),
 			&mockAuthInterceptor{data: &auth_jwt.TokenContextData{AuthUserId: "auth-user-id"}},
-			NewInterceptor(nucleusdb.New(mockDbtx, mockQuerier)),
+			NewInterceptor(neosyncdb.New(mockDbtx, mockQuerier)),
 		),
 	))
 
@@ -53,9 +52,9 @@ func Test_Interceptor_WrapUnary_JwtContextData_ValidUser(t *testing.T) {
 }
 
 func Test_Interceptor_WrapUnary_JwtContextData_NoUser_NoFail(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := testutil.GetTestLogger(t)
 
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
 	mux := http.NewServeMux()
@@ -66,7 +65,7 @@ func Test_Interceptor_WrapUnary_JwtContextData_NoUser_NoFail(t *testing.T) {
 		},
 		connect.WithInterceptors(
 			logger_interceptor.NewInterceptor(logger),
-			NewInterceptor(nucleusdb.New(mockDbtx, mockQuerier)),
+			NewInterceptor(neosyncdb.New(mockDbtx, mockQuerier)),
 		),
 	))
 
@@ -108,16 +107,16 @@ func startHTTPServer(tb testing.TB, h http.Handler) *httptest.Server {
 }
 
 func Test_getAuthValues_NoTokenCtx(t *testing.T) {
-	vals := getAuthValues(context.Background(), &nucleusdb.NucleusDb{})
+	vals := getAuthValues(context.Background(), &neosyncdb.NeosyncDb{})
 	require.Empty(t, vals)
 }
 
 func Test_getAuthValues_Valid_Jwt(t *testing.T) {
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
 	uuidstr := uuid.NewString()
-	genuuid, _ := nucleusdb.ToUuid(uuidstr)
+	genuuid, _ := neosyncdb.ToUuid(uuidstr)
 	mockQuerier.On("GetUserByProviderSub", mock.Anything, mock.Anything, "auth-user-id").
 		Return(db_queries.NeosyncApiUser{ID: genuuid}, nil)
 
@@ -125,7 +124,7 @@ func Test_getAuthValues_Valid_Jwt(t *testing.T) {
 		AuthUserId: "auth-user-id",
 	})
 
-	vals := getAuthValues(ctx, nucleusdb.New(mockDbtx, mockQuerier))
+	vals := getAuthValues(ctx, neosyncdb.New(mockDbtx, mockQuerier))
 	require.Equal(
 		t,
 		[]any{"authUserId", "auth-user-id", "userId", uuidstr},
@@ -134,7 +133,7 @@ func Test_getAuthValues_Valid_Jwt(t *testing.T) {
 }
 
 func Test_getAuthValues_Valid_Jwt_No_User(t *testing.T) {
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
 	mockQuerier.On("GetUserByProviderSub", mock.Anything, mock.Anything, "auth-user-id").
@@ -144,7 +143,7 @@ func Test_getAuthValues_Valid_Jwt_No_User(t *testing.T) {
 		AuthUserId: "auth-user-id",
 	})
 
-	vals := getAuthValues(ctx, nucleusdb.New(mockDbtx, mockQuerier))
+	vals := getAuthValues(ctx, neosyncdb.New(mockDbtx, mockQuerier))
 	require.Equal(
 		t,
 		[]any{"authUserId", "auth-user-id"},
@@ -153,16 +152,16 @@ func Test_getAuthValues_Valid_Jwt_No_User(t *testing.T) {
 }
 
 func Test_getAuthValues_Valid_ApiKey(t *testing.T) {
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
 	apikeyid := uuid.NewString()
 	accountid := uuid.NewString()
 	userid := uuid.NewString()
 
-	apikeyuuid, _ := nucleusdb.ToUuid(apikeyid)
-	accountiduuid, _ := nucleusdb.ToUuid(accountid)
-	useriduuid, _ := nucleusdb.ToUuid(userid)
+	apikeyuuid, _ := neosyncdb.ToUuid(apikeyid)
+	accountiduuid, _ := neosyncdb.ToUuid(accountid)
+	useriduuid, _ := neosyncdb.ToUuid(userid)
 
 	ctx := context.WithValue(context.Background(), auth_apikey.TokenContextKey{}, &auth_apikey.TokenContextData{
 		ApiKeyType: apikey.AccountApiKey,
@@ -173,7 +172,7 @@ func Test_getAuthValues_Valid_ApiKey(t *testing.T) {
 		},
 	})
 
-	vals := getAuthValues(ctx, nucleusdb.New(mockDbtx, mockQuerier))
+	vals := getAuthValues(ctx, neosyncdb.New(mockDbtx, mockQuerier))
 	require.Equal(
 		t,
 		[]any{"apiKeyType", apikey.AccountApiKey, "apiKeyId", apikeyid, "accountId", accountid, "userId", userid},
@@ -182,14 +181,14 @@ func Test_getAuthValues_Valid_ApiKey(t *testing.T) {
 }
 
 func Test_getAuthValues_Valid_ApiKey_No_Apikey(t *testing.T) {
-	mockDbtx := nucleusdb.NewMockDBTX(t)
+	mockDbtx := neosyncdb.NewMockDBTX(t)
 	mockQuerier := db_queries.NewMockQuerier(t)
 
 	ctx := context.WithValue(context.Background(), auth_apikey.TokenContextKey{}, &auth_apikey.TokenContextData{
 		ApiKeyType: apikey.AccountApiKey,
 	})
 
-	vals := getAuthValues(ctx, nucleusdb.New(mockDbtx, mockQuerier))
+	vals := getAuthValues(ctx, neosyncdb.New(mockDbtx, mockQuerier))
 	require.Equal(
 		t,
 		[]any{"apiKeyType", apikey.AccountApiKey},

@@ -1,3 +1,4 @@
+import TruncatedText from '@/components/TruncatedText';
 import { Button } from '@/components/ui/button';
 import {
   Command,
@@ -5,6 +6,7 @@ import {
   CommandGroup,
   CommandInput,
   CommandItem,
+  CommandList,
 } from '@/components/ui/command';
 import {
   Popover,
@@ -20,12 +22,12 @@ import {
   JobMappingTransformer,
   SystemTransformer,
   TransformerConfig,
-  TransformerSource,
   UserDefinedTransformer,
   UserDefinedTransformerConfig,
 } from '@neosync/sdk';
 import { CaretSortIcon, CheckIcon } from '@radix-ui/react-icons';
-import { ReactElement, useState } from 'react';
+import { ReactElement, useEffect, useState } from 'react';
+import { TransformerResult } from './transformer-handler';
 
 type Side = (typeof SIDE_OPTIONS)[number];
 
@@ -40,8 +42,9 @@ interface Props {
   buttonText: string;
   buttonClassName?: string;
   onSelect(value: JobMappingTransformerForm): void;
-  side: Side;
+  side?: Side;
   disabled: boolean;
+  notFoundText?: string;
 }
 
 export default function TransformerSelect(props: Props): ReactElement {
@@ -53,12 +56,18 @@ export default function TransformerSelect(props: Props): ReactElement {
     side,
     disabled,
     buttonClassName,
+    notFoundText = 'No transformers found.',
   } = props;
   const [open, setOpen] = useState(false);
 
-  const { system, userDefined } = open
-    ? getTransformers()
-    : { system: [], userDefined: [] };
+  const [{ system, userDefined }, setTransformerResult] =
+    useState<TransformerResult>({ system: [], userDefined: [] });
+
+  useEffect(() => {
+    if (open) {
+      setTransformerResult(getTransformers());
+    }
+  }, [open]);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -83,92 +92,94 @@ export default function TransformerSelect(props: Props): ReactElement {
         side={side}
       >
         <Command>
-          <CommandInput placeholder={buttonText} />
-          <CommandEmpty>No transformers found.</CommandEmpty>
-          <div className="max-h-[450px] overflow-y-scroll">
-            {userDefined.length > 0 && (
-              <CommandGroup heading="Custom">
-                {userDefined.map((t) => {
-                  return (
-                    <CommandItem
-                      key={t.id}
-                      onSelect={() => {
-                        onSelect(
-                          convertJobMappingTransformerToForm(
-                            new JobMappingTransformer({
-                              source: TransformerSource.USER_DEFINED,
-                              config: new TransformerConfig({
-                                config: {
-                                  case: 'userDefinedTransformerConfig',
-                                  value: new UserDefinedTransformerConfig({
-                                    id: t.id,
-                                  }),
-                                },
-                              }),
-                            })
-                          )
-                        );
-                        setOpen(false);
-                      }}
-                      value={t.name}
-                    >
-                      <div className="flex flex-row items-center justify-between w-full">
-                        <div className="flex flex-row items-center">
-                          <CheckIcon
-                            className={cn(
-                              'mr-2 h-4 w-4',
-                              value?.config?.case ===
-                                'userDefinedTransformerConfig' &&
-                                value?.source ===
-                                  TransformerSource.USER_DEFINED &&
-                                value.config.value.id === t.id
-                                ? 'opacity-100'
-                                : 'opacity-0'
-                            )}
-                          />
-                          <div className="items-center">{t?.name}</div>
+          <CommandInput placeholder={'Search...'} />
+          <div>
+            <CommandList className="max-h-[600px]">
+              <CommandEmpty>{notFoundText}</CommandEmpty>
+              {userDefined.length > 0 && (
+                <CommandGroup heading="Custom">
+                  {userDefined.map((t) => {
+                    return (
+                      <CommandItem
+                        key={t.id}
+                        onSelect={() => {
+                          onSelect(
+                            convertJobMappingTransformerToForm(
+                              new JobMappingTransformer({
+                                config: new TransformerConfig({
+                                  config: {
+                                    case: 'userDefinedTransformerConfig',
+                                    value: new UserDefinedTransformerConfig({
+                                      id: t.id,
+                                    }),
+                                  },
+                                }),
+                              })
+                            )
+                          );
+                          setOpen(false);
+                        }}
+                        value={t.name}
+                      >
+                        <div className="flex flex-row items-center justify-between w-full">
+                          <div className="flex flex-row items-center">
+                            <CheckIcon
+                              className={cn(
+                                'mr-2 h-4 w-4',
+                                value?.config?.case ===
+                                  'userDefinedTransformerConfig' &&
+                                  value.config.value.id === t.id
+                                  ? 'opacity-100'
+                                  : 'opacity-0'
+                              )}
+                            />
+                            <div className="items-center">
+                              <TruncatedText text={t?.name} maxWidth={200} />
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </CommandItem>
-                  );
-                })}
-              </CommandGroup>
-            )}
-            <CommandGroup heading="System">
-              {system.map((t) => {
-                return (
-                  <CommandItem
-                    key={t.source}
-                    onSelect={() => {
-                      onSelect(
-                        convertJobMappingTransformerToForm(
-                          new JobMappingTransformer({
-                            source: t.source,
-                            config: t.config,
-                          })
-                        )
-                      );
-                      setOpen(false);
-                    }}
-                    value={t.name}
-                  >
-                    <div className="flex flex-row items-center justify-between w-full">
-                      <div className=" flex flex-row items-center">
-                        <CheckIcon
-                          className={cn(
-                            'mr-2 h-4 w-4',
-                            value?.source === t?.source
-                              ? 'opacity-100'
-                              : 'opacity-0'
-                          )}
-                        />
-                        <div className="items-center">{t?.name}</div>
-                      </div>
-                    </div>
-                  </CommandItem>
-                );
-              })}
-            </CommandGroup>
+                      </CommandItem>
+                    );
+                  })}
+                </CommandGroup>
+              )}
+              {system.length > 0 && (
+                <CommandGroup heading="System">
+                  {system.map((t) => {
+                    return (
+                      <CommandItem
+                        key={t.source}
+                        onSelect={() => {
+                          onSelect(
+                            convertJobMappingTransformerToForm(
+                              new JobMappingTransformer({
+                                config: t.config,
+                              })
+                            )
+                          );
+                          setOpen(false);
+                        }}
+                        value={t.name}
+                      >
+                        <div className="flex flex-row items-center justify-between w-full">
+                          <div className=" flex flex-row items-center">
+                            <CheckIcon
+                              className={cn(
+                                'mr-2 h-4 w-4',
+                                value?.config.case === t?.config?.config.case
+                                  ? 'opacity-100'
+                                  : 'opacity-0'
+                              )}
+                            />
+                            <div className="items-center">{t?.name}</div>
+                          </div>
+                        </div>
+                      </CommandItem>
+                    );
+                  })}
+                </CommandGroup>
+              )}
+            </CommandList>
           </div>
         </Command>
       </PopoverContent>

@@ -1,87 +1,165 @@
+# image Configure the API Docker Image
 image:
-  repository:
-  # Overrides the image tag whose default is {{ printf "v%s" .Chart.AppVersion }}
+  # -- The default image repository
+  repository: ghcr.io/nucleuscloud/neosync/app
+  # -- Overrides the image tag whose default is {{ printf "v%s" .Chart.AppVersion }}
   tag:
+  # -- Overrides the default K8s pull policy
   pullPolicy:
 
+# -- Override the name specified on the Chart, which defaults to .Chart.Name
 nameOverride:
+# -- Fully overrides the chart name
 fullnameOverride:
 
+# -- Define a list of image pull secrets that will be used by the deployment
 imagePullSecrets: []
 
-serviceAccount:
-  # Specifies whether a service account should be created
-  create:
-  # The name of the service account to use. If namenot set and create is true, a name is generated using fullname template
-  name:
-  annotations: {}
-  #   eks.amazonaws.com/role-arn: arn:aws:iam::AWS_ACCOUNT_ID:role/IAM_ROLE_NAME
+# -- Provide a map of deployment annotations that will be attached to the deployment's annotations
+deploymentAnnotations: {}
 
-# Determines what .env file to load in if running bare metal
-# also adds a tag to the API logger
+# -- Provide a map of pod annotations that will be attached to the deployment's pod template annotations
+podAnnotations: {}
+
+# serviceAccount Specify service account options for the deployment
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- The name of the service account to use. If namenot set and create is true, a name is generated using fullname template
+  name:
+  # -- Specify annotations here that will be attached to the service account. Useful for specifying role information or other tagging depending on environment.
+  annotations: {}
+
+# -- Mostly used by NeosyncCloud. Adds a special tag to the logging to determine what environment is running
 nucleusEnv:
 
+# otel Currently does not do anything but will eventaully allow emitting otel metrics and traces
 otel:
+  # -- whether or not to enable open telemetry settings
   enabled: false
+  # -- Specifies the port that otel is listening on that the service will export metrics and traces to
   otlpPort: 4317
 
+# Set requests and limits on the backend to change its performance
+resources:
+  ## Sets the CPU and Memory baseline. These are low-usage defaults. Change these depending on your needs.
+  requests:
+    # -- Sets the CPU amount to be requested
+    cpu: '100m'
+    # -- Sets the Memory amount to be requested
+    memory: '128Mi'
+  ## Sets the max CPU and Memory. These are low-usage defaults. Change these depending on your needs.
+  limits:
+    # -- Sets the max CPU amount
+    cpu: '500m'
+    # -- Sets the max Memory amount
+    memory: '512Mi'
+
+# Adds annotations and labels to the deployment to opt it in to Istio service mesh. See the Neosync k8s docs for more details. This may be omitted and applied manually via the deployment's annotations and labels
 istio:
+  # -- Whether or not to apply the default istio annotations/labels to the deployment
   enabled: false
 
+# Adds annotations to support sending logs to Datadog. See the Neosync k8s docs for more details. This may be omitted and applied manually to the deployment.
 datadog:
+  # -- Whether or not to apply the default Datadog annotations/labels to the deployment
   enabled: false
 
+# -- Sets the host that the backend will listen on. 0.0.0.0 is common for Kubernetes workloads.
 host: 0.0.0.0
 
+# -- The K8s service port
 servicePort: 80
+# -- The container port
 containerPort: 3000
 
+# -- The amount of time in seconds to wait for the pod to shut down when a termination event has occurred.
 terminationGracePeriodSeconds:
+# -- Not currently used
 shutdownTimeoutSeconds:
 
 neosyncApi:
+  # -- The URL to the Neosync API instance
   url: http://neosync-api
 
+# -- next-auth secret that is used to encrypt the session cookie
 nextAuthSecret: 'This is an example'
+# -- next-auth base url. Should be the public url for the application
 nextAuthUrl: 'http://localhost:3000'
 
 nextPublic:
+  # -- next public app base url. Should be the public url for the application
   appBaseUrl: 'http://localhost:3000'
 
 auth:
+  # -- Enable/disable authentication
   enabled: false
+  # -- The client id that will be used by the app to retrieve user tokens
   clientId:
+  # -- The client secret that will be used by the app
   clientSecret:
+  # -- The issuer url. This is typically the base url of the auth service
   issuer:
+  # -- The scopes that should be requested. Standard are "openid email profile offline_access"
   scope:
+  # -- The audience that should be present in the JWT token
   audience:
+  # -- The ID of the provider for your OIDC client. This can be anything
+  providerId:
+  # -- The display name of the provider
+  providerName:
+  # -- Whether or not to trust the external host (most likely want this to be true if running behind a load balancer)
+  trustHost: true
 
 # check out the ingress.yaml file to see what ither values are available for configuration on this object.
 ingress:
-  # enable this if using K8s ingress to expose the backend to the internet
+  # -- Enable this if using K8s ingress to expose the backend to the internet
   enabled: false
 
 analytics:
+  # -- Enables analytics such as Posthog/Koala (if keys have been provided for them)
   enabled: true
 
 posthog:
+  # -- Posthog Key
   key: phc_qju45RhNvCDwYVdRyUjtWuWsOmLFaQZi3fmztMBaJip
   # host:
 
+koala:
+  # -- Koala Key
+  key:
+
+# -- Any tolerations that should be applied to the deployment
 tolerations: []
+# -- Any node selectors that should be applied to the deployment
 nodeSelector: {}
 
 neosyncCloud:
+  # -- Whether or not this is NeosyncCloud
   enabled: false
 
-enableRunLogs: false
+# -- Feature flag that enables the frontend to show the run logs on the Run [id] page.
+# only enable this if the backend has been configured to surface run logs
+enableRunLogs: true
 
-# whether or not to enable the metrics service and display usage metrics in the app
+# -- Feature flag that will disable GCP Cloud Storage Connections from being visible.
+# Note: This only disables the new connections form and is a temporary flag until authentication in the multi-tenant environment is better understood.
+disableGcpCloudStorageConnections: false
+
+## -- Whether or not to enable the metrics service and display usage metrics in the app
 # if this is enabled, the backend must also have the metrics service enabled and configured
 protometrics:
   enabled: false
 
+jobHooks:
+  # -- Enables Job Hooks on the frontend. Note: This will only work if it has also been enabled via the backend with a valid license
+  enabled: false
+
+# -- The strategy to use when rolling out new replicas
 updateStrategy:
 
-# Provide extra environment variables that will be applied to the deployment.
+# -- Provide extra environment variables that will be applied to the deployment.
 extraEnvVars: []
+
+# -- Provide sidecars that will be appended directly to the deployment next to the user-container
+sidecarContainers: []

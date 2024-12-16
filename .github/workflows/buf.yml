@@ -2,33 +2,33 @@ on:
   pull_request:
     paths:
       - backend/protos/**
-      - backend/BUF_VERSION
-      - backend/buf.gen.yaml
-      - backend/buf.work.yaml
+      - BUF_VERSION
+      - buf.gen.yaml
+      - buf.work.yaml
 
 name: Buf
+
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   buf:
-    name: buf-lint
+    name: buf
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
       - name: Retrieve Buf Version
+        id: buf-version
         run: |
           VER=$(cat BUF_VERSION)
-          echo "BUF_VERSION=$VER" >> $GITHUB_ENV
+          echo "version=$VER" >> $GITHUB_OUTPUT
 
-      - name: Setup Buf
-        uses: bufbuild/buf-setup-action@v1.32.0
+      - name: Buf
+        uses: bufbuild/buf-action@v1
         with:
-          version: ${{ env.BUF_VERSION }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Buf Lint
-        uses: bufbuild/buf-lint-action@v1
-        with:
-          input: backend
+          version: ${{ steps.buf-version.outputs.version }}
+          token: ${{ secrets.BUF_TOKEN }}
+          push: false # we don't want to push to the BSR
+          push_disable_create: true

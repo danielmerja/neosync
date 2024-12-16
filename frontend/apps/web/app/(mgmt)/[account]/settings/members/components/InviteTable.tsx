@@ -27,24 +27,27 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetAccountInvites } from '@/libs/hooks/useGetAccountInvites';
 import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
 import { formatDateTime, getErrorMessage } from '@/util/util';
 import { PlainMessage, Timestamp } from '@bufbuild/protobuf';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { AccountInvite } from '@neosync/sdk';
+import {
+  getTeamAccountInvites,
+  removeTeamAccountInvite,
+} from '@neosync/sdk/connectquery';
 import { TrashIcon } from '@radix-ui/react-icons';
-import InviteUserForm, { buildInviteLink } from './InviteUserForm';
+import { toast } from 'sonner';
+import { buildInviteLink } from './InviteUserForm';
 
 interface ColumnProps {
   onDeleted(id: string): void;
-  accountId: string;
 }
 
 function getColumns(
   props: ColumnProps
 ): ColumnDef<PlainMessage<AccountInvite>>[] {
-  const { onDeleted, accountId } = props;
+  const { onDeleted } = props;
   return [
     {
       accessorKey: 'email',
@@ -58,7 +61,7 @@ function getColumns(
         return (
           <div className="flex space-x-2">
             <span className="max-w-[500px] truncate font-medium">
-              {formatDateTime(row.getValue<Timestamp>('createdAt').toDate())}
+              {formatDateTime(row.getValue<Timestamp>('createdAt')?.toDate())}
             </span>
           </div>
         );
@@ -71,7 +74,7 @@ function getColumns(
         return (
           <div className="flex space-x-2">
             <span className="max-w-[500px] truncate font-medium">
-              {formatDateTime(row.getValue<Timestamp>('expiresAt').toDate())}
+              {formatDateTime(row.getValue<Timestamp>('expiresAt')?.toDate())}
             </span>
           </div>
         );
@@ -84,7 +87,6 @@ function getColumns(
           <div className="flex flex-row gap-2">
             <CopyInviteButton token={row.original.token} />
             <DeleteInviteButton
-              accountId={accountId}
               onDeleted={onDeleted}
               inviteId={row.original.id}
             />
@@ -101,29 +103,24 @@ interface Props {
 
 export function InvitesTable(props: Props) {
   const { accountId } = props;
-  const { data, isLoading, mutate } = useGetAccountInvites(accountId);
+  const { data, isLoading, refetch } = useQuery(
+    getTeamAccountInvites,
+    { accountId: accountId },
+    { enabled: !!accountId }
+  );
   if (isLoading) {
     return <SkeletonTable />;
   }
 
-  return (
-    <DataTable
-      data={data?.invites || []}
-      accountId={accountId}
-      onDeleted={() => mutate()}
-      onSubmit={() => mutate()}
-    />
-  );
+  return <DataTable data={data?.invites || []} onDeleted={() => refetch()} />;
 }
 
 interface DataTableProps {
   data: AccountInvite[];
-  accountId: string;
   onDeleted(id: string): void;
-  onSubmit(): void;
 }
 function DataTable(props: DataTableProps): React.ReactElement {
-  const { data, accountId, onDeleted, onSubmit } = props;
+  const { data, onDeleted } = props;
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
     []
@@ -132,10 +129,7 @@ function DataTable(props: DataTableProps): React.ReactElement {
     React.useState<VisibilityState>({});
   const [rowSelection, setRowSelection] = React.useState({});
 
-  const columns = React.useMemo(
-    () => getColumns({ accountId, onDeleted }),
-    [accountId]
-  );
+  const columns = React.useMemo(() => getColumns({ onDeleted }), []);
 
   const table = useReactTable({
     data,
@@ -167,7 +161,6 @@ function DataTable(props: DataTableProps): React.ReactElement {
           }
           className="max-w-sm"
         />
-        <InviteUserForm accountId={accountId} onInvited={onSubmit} />
       </div>
       <div className="rounded-md border">
         <Table>
@@ -226,29 +219,20 @@ function DataTable(props: DataTableProps): React.ReactElement {
 interface DeleteInviteButtonProps {
   inviteId: string;
   onDeleted(id: string): void;
-  accountId: string;
 }
 
-function DeleteInviteButton({
-  inviteId,
-  onDeleted,
-  accountId,
-}: DeleteInviteButtonProps) {
-  const { toast } = useToast();
+function DeleteInviteButton({ inviteId, onDeleted }: DeleteInviteButtonProps) {
+  const { mutateAsync } = useMutation(removeTeamAccountInvite);
 
   async function onRemove(): Promise<void> {
     try {
-      await deleteAccountInvite(accountId, inviteId);
-      toast({
-        title: 'Invite deleted successfully!',
-      });
+      await mutateAsync({ id: inviteId });
+      toast.success('Invite deleted successfully!');
       onDeleted(inviteId);
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to delete invite',
+      toast.error('Unable to delete user invite', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -283,21 +267,4 @@ function CopyInviteButton({ token }: CopyInviteButtonProps) {
       onHoverText="Copy the invite link"
     />
   );
-}
-
-async function deleteAccountInvite(
-  accountId: string,
-  inviteId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/users/accounts/${accountId}/invites?id=${inviteId}`,
-    {
-      method: 'DELETE',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
 }

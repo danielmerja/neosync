@@ -6,20 +6,22 @@ import {
 } from '@radix-ui/react-icons';
 import { ReactElement } from 'react';
 
-import { useGetUserAccounts } from '@/libs/hooks/useUserAccounts';
+import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
 import { cn } from '@/libs/utils';
 import { getErrorMessage } from '@/util/util';
-import { RESOURCE_NAME_REGEX } from '@/yup-validations/connections';
+import { CreateTeamFormValues } from '@/yup-validations/account-switcher';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
+import { UserAccount, UserAccountType } from '@neosync/sdk';
 import {
-  CreateTeamAccountRequest,
-  CreateTeamAccountResponse,
-  UserAccountType,
-} from '@neosync/sdk';
-import Link from 'next/link';
+  convertPersonalToTeamAccount,
+  createTeamAccount,
+  getUserAccounts,
+} from '@neosync/sdk/connectquery';
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { UseFormReturn, useForm } from 'react-hook-form';
-import * as Yup from 'yup';
+import { useForm } from 'react-hook-form';
+import { toast } from 'sonner';
 import { useAccount } from '../providers/account-provider';
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
 import { Button } from '../ui/button';
@@ -32,117 +34,136 @@ import {
   CommandList,
   CommandSeparator,
 } from '../ui/command';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '../ui/dialog';
+import { DialogTrigger } from '../ui/dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Skeleton } from '../ui/skeleton';
-import { toast } from '../ui/use-toast';
-
-export const CreateTeamFormValues = Yup.object({
-  name: Yup.string()
-    .required()
-    .min(3)
-    .max(30)
-    .test(
-      'valid account name',
-      'Account Name must be of length 3-30 and only include lowercased letters, numbers, and/or hyphens.',
-      (value) => {
-        if (!value || value.length < 3) {
-          return false;
-        }
-        if (!RESOURCE_NAME_REGEX.test(value)) {
-          return false;
-        }
-        // todo: test to make sure that account is valid across neosync
-        return true;
-      }
-    ),
-});
-export type CreateTeamFormValues = Yup.InferType<typeof CreateTeamFormValues>;
+import { CreateNewTeamDialog } from './CreateNewTeamDialog';
 
 interface Props {}
 
-export default function AccountSwitcher(_: Props): ReactElement {
+export default function AccountSwitcher(_: Props): ReactElement | null {
   const { account, setAccount } = useAccount();
-  const { data, mutate, isLoading } = useGetUserAccounts();
-  const [open, setOpen] = useState(false);
+  const { data, isLoading } = useQuery(getUserAccounts);
   const [showNewTeamDialog, setShowNewTeamDialog] = useState(false);
-  const form = useForm({
+  const { data: systemAppConfigData } = useGetSystemAppConfig();
+  const accounts = data?.accounts ?? [];
+  const createNewTeamForm = useForm<CreateTeamFormValues>({
     mode: 'onChange',
     resolver: yupResolver(CreateTeamFormValues),
     defaultValues: {
       name: '',
+      convertPersonalToTeam: false,
     },
   });
 
-  const accounts = data?.accounts ?? [];
-  const personalAccounts =
-    accounts.filter((a) => a.type === UserAccountType.PERSONAL) ?? [];
-  const teamAccounts =
-    accounts.filter((a) => a.type === UserAccountType.TEAM) ?? [];
-
-  async function onSubmit(values: CreateTeamFormValues): Promise<void> {
-    // add acount type here
-    try {
-      await createTeamAccount(values.name);
+  const onSubmit = useGetOnCreateTeamSubmit({
+    onDone() {
       setShowNewTeamDialog(false);
-      mutate();
-      toast({
-        title: 'Successfully created team!',
-      });
-    } catch (err) {
-      console.error(err);
-      toast({
-        title: 'Unable to create team',
-        description: getErrorMessage(err),
-        variant: 'destructive',
-      });
-    }
-  }
+    },
+  });
+
   if (isLoading) {
     return <Skeleton className=" h-full w-[200px]" />;
   }
 
   return (
-    <Dialog open={showNewTeamDialog} onOpenChange={setShowNewTeamDialog}>
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            variant="outline"
-            role="combobox"
-            aria-expanded={open}
-            aria-label="Select a team"
-            className="w-[200px] justify-between"
-          >
-            <Avatar className="mr-2 h-5 w-5">
-              <AvatarImage
-                src={`https://avatar.vercel.sh/${account?.id}.png`}
-                alt={account?.name}
-              />
-              <AvatarFallback>SC</AvatarFallback>
-            </Avatar>
-            {account?.name}
-            <CaretSortIcon className="ml-auto h-4 w-4 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent className="w-[200px] p-0">
-          <Command>
-            <CommandList>
-              <CommandInput placeholder="Search account..." />
-              <CommandEmpty>No Account found.</CommandEmpty>
+    <CreateNewTeamDialog
+      form={createNewTeamForm}
+      open={showNewTeamDialog}
+      onOpenChange={setShowNewTeamDialog}
+      onSubmit={onSubmit}
+      onCancel={() => setShowNewTeamDialog(false)}
+      trigger={
+        <AccountSwitcherPopover
+          activeAccount={account}
+          accounts={accounts}
+          onAccountSelect={(a) => {
+            setAccount(a);
+            // the user has changed the active account, reset the create new team form
+            createNewTeamForm.reset();
+          }}
+          onNewAccount={() => {
+            setShowNewTeamDialog(true);
+          }}
+          showCreateTeamDialog={
+            !systemAppConfigData?.isNeosyncCloud ||
+            (systemAppConfigData.isNeosyncCloud &&
+              systemAppConfigData.isStripeEnabled)
+          }
+        />
+      }
+      showSubscriptionInfo={
+        (systemAppConfigData?.isNeosyncCloud ?? false) &&
+        (systemAppConfigData?.isStripeEnabled ?? false)
+      }
+      showConvertPersonalToTeamOption={
+        account?.type === UserAccountType.PERSONAL
+      }
+    />
+  );
+}
+
+interface AccountSwitcherPopoverProps {
+  activeAccount: UserAccount | undefined;
+  accounts: UserAccount[];
+  onAccountSelect(account: UserAccount): void;
+  onNewAccount(): void;
+  showCreateTeamDialog: boolean;
+}
+
+function AccountSwitcherPopover(
+  props: AccountSwitcherPopoverProps
+): ReactElement {
+  const {
+    activeAccount,
+    accounts,
+    onAccountSelect,
+    onNewAccount,
+    showCreateTeamDialog,
+  } = props;
+  const [open, setOpen] = useState(false);
+
+  const personalAccounts =
+    accounts.filter((a) => a.type === UserAccountType.PERSONAL) ?? [];
+  const teamAccounts =
+    accounts.filter(
+      (a) =>
+        a.type === UserAccountType.TEAM || a.type === UserAccountType.ENTERPRISE
+    ) ?? [];
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          aria-label="Select a team"
+          className="w-[200px] justify-between"
+        >
+          <Avatar className="mr-2 h-5 w-5">
+            <AvatarImage
+              src={`https://avatar.vercel.sh/${activeAccount?.id}.png`}
+              alt={activeAccount?.name}
+            />
+            <AvatarFallback>SC</AvatarFallback>
+          </Avatar>
+          {activeAccount?.name}
+          <CaretSortIcon className="ml-auto h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[200px] p-0">
+        <Command>
+          <CommandInput placeholder="Search account..." />
+          <CommandList>
+            <CommandEmpty>No Account found.</CommandEmpty>
+            {personalAccounts.length > 0 && (
               <CommandGroup key="personal" heading="Personal">
                 {personalAccounts.map((a) => (
                   <CommandItem
                     key={a.id}
                     onSelect={() => {
-                      setAccount(a);
+                      onAccountSelect(a);
                       setOpen(false);
                     }}
                     className="text-sm cursor-pointer"
@@ -159,18 +180,20 @@ export default function AccountSwitcher(_: Props): ReactElement {
                     <CheckIcon
                       className={cn(
                         'ml-auto h-4 w-4',
-                        account?.id === a.id ? 'opacity-100' : 'opacity-0'
+                        activeAccount?.id === a.id ? 'opacity-100' : 'opacity-0'
                       )}
                     />
                   </CommandItem>
                 ))}
               </CommandGroup>
+            )}
+            {teamAccounts.length > 0 && (
               <CommandGroup key="team" heading="Team">
                 {teamAccounts.map((a) => (
                   <CommandItem
                     key={a.id}
                     onSelect={() => {
-                      setAccount(a);
+                      onAccountSelect(a);
                       setOpen(false);
                     }}
                     className="text-sm cursor-pointer"
@@ -186,21 +209,23 @@ export default function AccountSwitcher(_: Props): ReactElement {
                     <CheckIcon
                       className={cn(
                         'ml-auto h-4 w-4',
-                        account?.id === a.id ? 'opacity-100' : 'opacity-0'
+                        activeAccount?.id === a.id ? 'opacity-100' : 'opacity-0'
                       )}
                     />
                   </CommandItem>
                 ))}
               </CommandGroup>
-            </CommandList>
-            <CommandSeparator />
+            )}
+          </CommandList>
+          <CommandSeparator />
+          {showCreateTeamDialog && (
             <CommandList>
               <CommandGroup>
                 <DialogTrigger asChild>
                   <CommandItem
                     onSelect={() => {
                       setOpen(false);
-                      setShowNewTeamDialog(true);
+                      onNewAccount();
                     }}
                     className="cursor-pointer"
                   >
@@ -210,139 +235,98 @@ export default function AccountSwitcher(_: Props): ReactElement {
                 </DialogTrigger>
               </CommandGroup>
             </CommandList>
-          </Command>
-        </PopoverContent>
-      </Popover>
-      <CreateNewTeamDialog
-        form={form}
-        onSubmit={onSubmit}
-        setShowNewTeamDialog={setShowNewTeamDialog}
-        planType={account?.type ?? UserAccountType.PERSONAL}
-      />
-    </Dialog>
+          )}
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
-interface CreateNewTeamDialogProps {
-  form: UseFormReturn<
-    {
-      name: string;
-    },
-    any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    undefined
-  >;
-  onSubmit: (values: CreateTeamFormValues) => Promise<void>;
-  setShowNewTeamDialog: (val: boolean) => void;
-  planType: UserAccountType;
+interface UseGetOnCreateTeamSubmitProps {
+  onDone?(): void;
 }
 
-export function CreateNewTeamDialog(
-  props: CreateNewTeamDialogProps
-): ReactElement {
-  const { planType } = props;
-  return (
-    <div>
-      {/* {(planType && planType == UserAccountType.PERSONAL) ||
-      planType == UserAccountType.TEAM ? ( */}
-      <UpgradeDialog planType={planType} />
-      {/* ) : (
-        <DialogContent className="flex flex-col gap-3">
-          <DialogHeader>
-            <DialogTitle>Create team</DialogTitle>
-            <DialogDescription>
-              Create a new team account to collaborate with your co-workers.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <Form {...form}>
-              <FormField
-                control={form.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormControl>
-                      <Input placeholder="acme" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </Form>
-          </div>
-          <DialogFooter>
-            <div className="flex flex-row justify-between w-full pt-6">
-              <Button
-                variant="outline"
-                onClick={() => setShowNewTeamDialog(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                onClick={(e) =>
-                  form.handleSubmit((values) => onSubmit(values))(e)
-                }
-                disabled={!form.formState.isValid}
-              >
-                Continue
-              </Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      )} */}
-    </div>
+export function useGetOnCreateTeamSubmit(
+  props: UseGetOnCreateTeamSubmitProps
+): (values: CreateTeamFormValues) => Promise<void> {
+  const { onDone = () => undefined } = props;
+
+  const { account, setAccount } = useAccount();
+
+  const { mutateAsync: createTeamAccountAsync } =
+    useMutation(createTeamAccount);
+  const { mutateAsync: convertPersonalToTeamAccountAsync } = useMutation(
+    convertPersonalToTeamAccount
   );
-}
+  const { refetch: refreshUserAccountsAsync } = useQuery(getUserAccounts);
+  const router = useRouter();
 
-interface UpgradeDialog {
-  planType: UserAccountType;
-}
+  return async (values) => {
+    if (!account) {
+      return;
+    }
+    if (
+      values.convertPersonalToTeam &&
+      account?.type !== UserAccountType.PERSONAL
+    ) {
+      toast.error(
+        'Selected account must be personal account to issue account conversion.'
+      );
+      return;
+    }
+    try {
+      if (values.convertPersonalToTeam) {
+        const resp = await convertPersonalToTeamAccountAsync({
+          name: values.name,
+          accountId: account.id,
+        });
+        const mutatedResp = await refreshUserAccountsAsync();
+        toast.success('Successfully converted personal to team!');
 
-function UpgradeDialog({}: UpgradeDialog) {
-  return (
-    <div>
-      <DialogContent className="flex flex-col gap-3">
-        <DialogHeader>
-          <DialogTitle>Upgrade your plan to create a Team</DialogTitle>
-          <DialogDescription>
-            Contact us in order to create a new team.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <div className="flex flex-row w-full pt-6 justify-center">
-            <Button>
-              <Link
-                href="https://calendly.com/evis1/30min"
-                className="w-[242px]"
-                target="_blank"
-              >
-                Get in touch
-              </Link>
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </div>
-  );
-}
-
-export async function createTeamAccount(
-  teamName: string
-): Promise<CreateTeamAccountResponse | undefined> {
-  const res = await fetch(`/api/users/accounts`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(
-      new CreateTeamAccountRequest({
-        name: teamName,
-      })
-    ),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateTeamAccountResponse.fromJson(await res.json());
+        if (resp.checkoutSessionUrl) {
+          onDone();
+          router.push(resp.checkoutSessionUrl);
+        } else {
+          const newAcc = mutatedResp.data?.accounts.find(
+            (a) => a.name === values.name
+          );
+          if (newAcc) {
+            setAccount(newAcc);
+          } else {
+            toast.error(
+              'Team was created but was unable to navigate to new team. Please try refreshing the page.'
+            );
+          }
+          onDone();
+        }
+      } else {
+        const resp = await createTeamAccountAsync({
+          name: values.name,
+        });
+        const mutatedResp = await refreshUserAccountsAsync();
+        toast.success('Successfully created team!');
+        if (resp.checkoutSessionUrl) {
+          onDone();
+          router.push(resp.checkoutSessionUrl);
+        } else {
+          const newAcc = mutatedResp.data?.accounts.find(
+            (a) => a.name === values.name
+          );
+          if (newAcc) {
+            setAccount(newAcc);
+          } else {
+            toast.error(
+              'Team was created but was unable to navigate to new team. Please try refreshing the page.'
+            );
+          }
+          onDone();
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Unable to create team', {
+        description: getErrorMessage(err),
+      });
+    }
+  };
 }

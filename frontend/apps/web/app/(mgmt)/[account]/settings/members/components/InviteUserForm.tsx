@@ -20,25 +20,17 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { toast } from '@/components/ui/use-toast';
 import { useGetSystemAppConfig } from '@/libs/hooks/useGetSystemAppConfig';
 import { getErrorMessage } from '@/util/util';
+import { InviteMembersForm } from '@/yup-validations/invite-members';
+import { useMutation } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
-import {
-  InviteUserToTeamAccountRequest,
-  InviteUserToTeamAccountResponse,
-} from '@neosync/sdk';
+import { inviteUserToTeamAccount } from '@neosync/sdk/connectquery';
 import { DialogClose } from '@radix-ui/react-dialog';
 import { PlusIcon } from '@radix-ui/react-icons';
 import { ReactElement, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import * as Yup from 'yup';
-
-const FORM_SCHEMA = Yup.object({
-  email: Yup.string().email().required(),
-});
-
-type FormValues = Yup.InferType<typeof FORM_SCHEMA>;
+import { toast } from 'sonner';
 
 interface Props {
   accountId: string;
@@ -50,33 +42,32 @@ export default function InviteUserForm(props: Props): ReactElement {
   const [newInviteToken, setNewInviteToken] = useState('');
   const [openInviteCreated, setOpenInviteCreated] = useState(false);
 
-  const form = useForm<FormValues>({
-    resolver: yupResolver(FORM_SCHEMA),
+  const form = useForm<InviteMembersForm>({
+    resolver: yupResolver(InviteMembersForm),
     defaultValues: {
       email: '',
     },
   });
+  const { mutateAsync } = useMutation(inviteUserToTeamAccount);
 
-  async function onSubmit(values: FormValues): Promise<void> {
+  async function onSubmit(values: InviteMembersForm): Promise<void> {
     try {
-      const invite = await inviteUserToTeamAccount(accountId, values.email);
+      const invite = await mutateAsync({
+        accountId: accountId,
+        email: values.email,
+      });
       setShowNewinviteDialog(false);
       if (invite?.invite?.token) {
         setNewInviteToken(invite.invite.token);
         setOpenInviteCreated(true);
       }
       onInvited();
-      toast({
-        title: 'Successfully created invite!',
-        variant: 'success',
-      });
+      toast.success('Successfuly created user invite!');
       form.reset();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create invite',
+      toast.error('Unable to create user invite.', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -110,6 +101,8 @@ export default function InviteUserForm(props: Props): ReactElement {
                   <FormItem>
                     <FormControl>
                       <Input
+                        autoCapitalize="off"
+                        data-1p-ignore // tells 1password extension to not autofill this field
                         type="email"
                         id="email"
                         placeholder="example@email.com"
@@ -184,29 +177,6 @@ function InviteCreatedDialog(props: InviteCreatedDialogProps): ReactElement {
       </DialogContent>
     </Dialog>
   );
-}
-
-async function inviteUserToTeamAccount(
-  accountId: string,
-  email: string
-): Promise<InviteUserToTeamAccountResponse | undefined> {
-  const res = await fetch(`/api/users/accounts/${accountId}/invites`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(
-      new InviteUserToTeamAccountRequest({
-        email,
-        accountId,
-      })
-    ),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return InviteUserToTeamAccountResponse.fromJson(await res.json());
 }
 
 export function buildInviteLink(baseUrl: string, token: string): string {

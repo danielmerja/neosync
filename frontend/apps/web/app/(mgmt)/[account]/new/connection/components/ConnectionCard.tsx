@@ -1,6 +1,7 @@
 'use client';
 import ConnectionIcon from '@/components/connections/ConnectionIcon';
 import { useAccount } from '@/components/providers/account-provider';
+import { Badge } from '@/components/ui/badge';
 import {
   Card,
   CardDescription,
@@ -9,14 +10,7 @@ import {
 } from '@/components/ui/card';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ReactElement } from 'react';
-import { ConnectionType } from '../../../connections/util';
-
-export interface ConnectionMeta {
-  name: string;
-  description: string;
-  urlSlug: string;
-  connectionType: ConnectionType;
-}
+import { ConnectionMeta } from '../../../connections/util';
 
 interface Props {
   connection: ConnectionMeta;
@@ -41,8 +35,12 @@ export default function ConnectionCard(props: Props): ReactElement {
       <CardHeader>
         <CardTitle>
           <div className="flex flex-row items-center space-x-2">
-            <ConnectionIcon name={connection.name} />
+            <ConnectionIcon
+              connectionType={connection.connectionType}
+              connectionTypeVariant={connection.connectionTypeVariant}
+            />
             <p>{connection.name}</p>
+            {connection.isExperimental ? <Badge>Experimental</Badge> : null}
           </div>
         </CardTitle>
         <CardDescription>{connection.description}</CardDescription>

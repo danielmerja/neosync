@@ -2,7 +2,7 @@ package genbenthosconfigs_activity
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -10,30 +10,28 @@ import (
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
 	"github.com/nucleuscloud/neosync/backend/pkg/metrics"
-	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	"github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	sqlmanager_mssql "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/mssql"
+	sqlmanager_postgres "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/postgres"
 	tabledependency "github.com/nucleuscloud/neosync/backend/pkg/table-dependency"
-	neosync_benthos "github.com/nucleuscloud/neosync/worker/internal/benthos"
+	benthosbuilder "github.com/nucleuscloud/neosync/internal/benthos/benthos-builder"
+	bb_shared "github.com/nucleuscloud/neosync/internal/benthos/benthos-builder/shared"
+	querybuilder2 "github.com/nucleuscloud/neosync/worker/pkg/query-builder2"
 	"github.com/nucleuscloud/neosync/worker/pkg/workflows/datasync/activities/shared"
-)
 
-const (
-	generateDefault            = "generate_default"
-	passthrough                = "passthrough"
-	dbDefault                  = "DEFAULT"
-	jobmappingSubsetErrMsg     = "job mappings are not equal to or a subset of the database schema found in the source connection"
-	haltOnSchemaAdditionErrMsg = "job mappings does not contain a column mapping for all " +
-		"columns found in the source connection for the selected schemas and tables"
+	"gopkg.in/yaml.v3"
 )
 
 type benthosBuilder struct {
-	sqlmanager sql_manager.SqlManagerClient
+	sqlmanagerclient sqlmanager.SqlManagerClient
 
 	jobclient         mgmtv1alpha1connect.JobServiceClient
 	connclient        mgmtv1alpha1connect.ConnectionServiceClient
 	transformerclient mgmtv1alpha1connect.TransformersServiceClient
 
-	jobId string
-	runId string
+	jobId      string
+	workflowId string
+	runId      string
 
 	redisConfig *shared.RedisConfig
 
@@ -41,142 +39,167 @@ type benthosBuilder struct {
 }
 
 func newBenthosBuilder(
-	sqlmanager sql_manager.SqlManagerClient,
+	sqlmanagerclient sqlmanager.SqlManagerClient,
 
 	jobclient mgmtv1alpha1connect.JobServiceClient,
 	connclient mgmtv1alpha1connect.ConnectionServiceClient,
 	transformerclient mgmtv1alpha1connect.TransformersServiceClient,
 
-	jobId, runId string,
+	jobId, workflowId string, runId string,
 
 	redisConfig *shared.RedisConfig,
 
 	metricsEnabled bool,
 ) *benthosBuilder {
 	return &benthosBuilder{
-		sqlmanager:        sqlmanager,
+		sqlmanagerclient:  sqlmanagerclient,
 		jobclient:         jobclient,
 		connclient:        connclient,
 		transformerclient: transformerclient,
 		jobId:             jobId,
+		workflowId:        workflowId,
 		runId:             runId,
 		redisConfig:       redisConfig,
 		metricsEnabled:    metricsEnabled,
 	}
 }
 
-func (b *benthosBuilder) GenerateBenthosConfigs(
+type workflowMetadata struct {
+	WorkflowId string
+	RunId      string
+}
+
+func (b *benthosBuilder) GenerateBenthosConfigsNew(
 	ctx context.Context,
 	req *GenerateBenthosConfigsRequest,
+	wfmetadata *workflowMetadata,
 	slogger *slog.Logger,
 ) (*GenerateBenthosConfigsResponse, error) {
 	job, err := b.getJobById(ctx, req.JobId)
 	if err != nil {
 		return nil, fmt.Errorf("unable to get job by id: %w", err)
 	}
-	responses := []*BenthosConfigResponse{}
-
-	// reverse of table dependency
-	// map of foreign key to source table + column
-	var primaryKeyToForeignKeysMap map[string]map[string][]*referenceKey            // schema.table -> column -> ForeignKey
-	var colTransformerMap map[string]map[string]*mgmtv1alpha1.JobMappingTransformer // schema.table -> column -> transformer
-	var aiGroupedTableCols map[string][]string                                      // map of table key to columns for AI Generated schemas
-
-	switch job.Source.Options.Config.(type) {
-	case *mgmtv1alpha1.JobSourceOptions_AiGenerate:
-		sourceResponses, aimappings, err := b.getAiGenerateBenthosConfigResponses(ctx, job, slogger)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build benthos AI Generate source config responses: %w", err)
-		}
-		aiGroupedTableCols = aimappings
-		responses = append(responses, sourceResponses...)
-	case *mgmtv1alpha1.JobSourceOptions_Generate:
-		sourceResponses, err := b.getGenerateBenthosConfigResponses(ctx, job)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build benthos Generate source config responses: %w", err)
-		}
-		responses = append(responses, sourceResponses...)
-	case *mgmtv1alpha1.JobSourceOptions_Postgres, *mgmtv1alpha1.JobSourceOptions_Mysql:
-		resp, err := b.getSqlSyncBenthosConfigResponses(ctx, job, slogger)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build benthos sql sync source config responses: %w", err)
-		}
-		primaryKeyToForeignKeysMap = resp.primaryKeyToForeignKeysMap
-		colTransformerMap = resp.ColumnTransformerMap
-		responses = append(responses, resp.BenthosConfigs...)
-	default:
-		return nil, errors.New("unsupported job source")
+	sourceConnection, err := shared.GetJobSourceConnection(ctx, job.GetSource(), b.connclient)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get connection by id: %w", err)
 	}
 
-	for destIdx, destination := range job.Destinations {
+	destConnections := []*mgmtv1alpha1.Connection{}
+	for _, destination := range job.Destinations {
 		destinationConnection, err := shared.GetConnectionById(ctx, b.connclient, destination.ConnectionId)
 		if err != nil {
 			return nil, fmt.Errorf("unable to get destination connection (%s) by id: %w", destination.ConnectionId, err)
 		}
-		for _, resp := range responses {
-			dstEnvVarKey := fmt.Sprintf("DESTINATION_%d_CONNECTION_DSN", destIdx)
-			dsn := fmt.Sprintf("${%s}", dstEnvVarKey)
-
-			switch connection := destinationConnection.ConnectionConfig.Config.(type) {
-			case *mgmtv1alpha1.ConnectionConfig_PgConfig, *mgmtv1alpha1.ConnectionConfig_MysqlConfig:
-				driver, err := getSqlDriverFromConnection(destinationConnection)
-				if err != nil {
-					return nil, err
-				}
-				resp.BenthosDsns = append(resp.BenthosDsns, &shared.BenthosDsn{EnvVarKey: dstEnvVarKey, ConnectionId: destinationConnection.Id})
-				if resp.Config.Input.SqlSelect != nil || resp.Config.Input.PooledSqlRaw != nil {
-					// SQL sync output
-					outputs, err := b.getSqlSyncBenthosOutput(driver, destination, resp, dsn, primaryKeyToForeignKeysMap, colTransformerMap)
-					if err != nil {
-						return nil, err
-					}
-					resp.Config.Output.Broker.Outputs = append(resp.Config.Output.Broker.Outputs, outputs...)
-				} else if resp.Config.Input.Generate != nil {
-					// SQL generate output
-					outputs := b.getSqlGenerateOutput(driver, resp, destination, dsn)
-					resp.Config.Output.Broker.Outputs = append(resp.Config.Output.Broker.Outputs, outputs...)
-				} else if resp.Config.Input.OpenAiGenerate != nil {
-					// SQL AI generate output
-					outputs, err := b.getSqlAiGenerateOutput(driver, resp, destination, dsn, aiGroupedTableCols)
-					if err != nil {
-						return nil, err
-					}
-					resp.Config.Output.Broker.Outputs = append(resp.Config.Output.Broker.Outputs, outputs...)
-				} else {
-					return nil, errors.New("unable to build destination connection due to unsupported source connection")
-				}
-			case *mgmtv1alpha1.ConnectionConfig_AwsS3Config:
-				if resp.RunType == tabledependency.RunTypeUpdate {
-					continue
-				}
-				outputs := b.getAwsS3SyncBenthosOutput(connection, resp, req.WorkflowId)
-				resp.Config.Output.Broker.Outputs = append(resp.Config.Output.Broker.Outputs, outputs...)
-			default:
-				return nil, fmt.Errorf("unsupported destination connection config")
-			}
-		}
+		destConnections = append(destConnections, destinationConnection)
 	}
 
-	if b.metricsEnabled {
-		labels := metrics.MetricLabels{
-			metrics.NewEqLabel(metrics.AccountIdLabel, job.AccountId),
-			metrics.NewEqLabel(metrics.JobIdLabel, job.Id),
-			metrics.NewEqLabel(metrics.TemporalWorkflowId, "${TEMPORAL_WORKFLOW_ID}"),
-			metrics.NewEqLabel(metrics.TemporalRunId, "${TEMPORAL_RUN_ID}"),
-		}
-		for _, resp := range responses {
-			joinedLabels := append(labels, resp.metriclabels...) //nolint:gocritic
-			resp.Config.Metrics = &neosync_benthos.Metrics{
-				OtelCollector: &neosync_benthos.MetricsOtelCollector{},
-				Mapping:       joinedLabels.ToBenthosMeta(),
-			}
-		}
+	benthosManagerConfig := &benthosbuilder.WorkerBenthosConfig{
+		Job:                    job,
+		SourceConnection:       sourceConnection,
+		DestinationConnections: destConnections,
+		WorkflowId:             wfmetadata.WorkflowId,
+		Logger:                 slogger,
+		Sqlmanagerclient:       b.sqlmanagerclient,
+		Transformerclient:      b.transformerclient,
+		Connectionclient:       b.connclient,
+		RedisConfig:            b.redisConfig,
+		SelectQueryBuilder:     &querybuilder2.QueryMapBuilderWrapper{},
+		MetricsEnabled:         b.metricsEnabled,
+		MetricLabelKeyVals: map[string]string{
+			metrics.TemporalWorkflowId: bb_shared.WithEnvInterpolation(metrics.TemporalWorkflowIdEnvKey),
+			metrics.TemporalRunId:      bb_shared.WithEnvInterpolation(metrics.TemporalRunIdEnvKey),
+		},
+	}
+	benthosManager, err := benthosbuilder.NewWorkerBenthosConfigManager(benthosManagerConfig)
+	if err != nil {
+		return nil, err
+	}
+	responses, err := benthosManager.GenerateBenthosConfigs(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	slogger.Info(fmt.Sprintf("successfully built %d benthos configs", len(responses)))
+	// TODO move run context logic into benthos builder
+	postTableSyncRunCtx := buildPostTableSyncRunCtx(responses, job.Destinations)
+	err = b.setPostTableSyncRunCtx(ctx, postTableSyncRunCtx, job.GetAccountId())
+	if err != nil {
+		return nil, fmt.Errorf("unable to set all run contexts for post table sync configs: %w", err)
+	}
+
+	outputConfigs, err := b.setRunContexts(ctx, responses, job.GetAccountId())
+	if err != nil {
+		return nil, fmt.Errorf("unable to set all run contexts for benthos configs: %w", err)
+	}
 	return &GenerateBenthosConfigsResponse{
-		BenthosConfigs: responses,
+		AccountId:      job.AccountId,
+		BenthosConfigs: outputConfigs,
 	}, nil
+}
+
+// this method modifies the input responses by nilling out the benthos config. it returns the same slice for convenience
+func (b *benthosBuilder) setRunContexts(
+	ctx context.Context,
+	responses []*benthosbuilder.BenthosConfigResponse,
+	accountId string,
+) ([]*benthosbuilder.BenthosConfigResponse, error) {
+	rcstream := b.jobclient.SetRunContexts(ctx)
+
+	for _, config := range responses {
+		bits, err := yaml.Marshal(config.Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal benthos config: %w", err)
+		}
+		err = rcstream.Send(&mgmtv1alpha1.SetRunContextsRequest{
+			Id: &mgmtv1alpha1.RunContextKey{
+				JobRunId:   b.workflowId,
+				ExternalId: shared.GetBenthosConfigExternalId(config.Name),
+				AccountId:  accountId,
+			},
+			Value: bits,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to send run context: %w", err)
+		}
+		config.Config = nil // nilling this out so that it does not persist in temporal
+	}
+
+	_, err := rcstream.CloseAndReceive()
+	if err != nil {
+		return nil, fmt.Errorf("unable to receive response from benthos runcontext request: %w", err)
+	}
+	return responses, nil
+}
+
+func (b *benthosBuilder) setPostTableSyncRunCtx(
+	ctx context.Context,
+	postSyncConfigs map[string]*shared.PostTableSyncConfig,
+	accountId string,
+) error {
+	rcstream := b.jobclient.SetRunContexts(ctx)
+
+	for name, config := range postSyncConfigs {
+		bits, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("failed to marshal post table sync config: %w", err)
+		}
+		err = rcstream.Send(&mgmtv1alpha1.SetRunContextsRequest{
+			Id: &mgmtv1alpha1.RunContextKey{
+				JobRunId:   b.workflowId,
+				ExternalId: shared.GetPostTableSyncConfigExternalId(name),
+				AccountId:  accountId,
+			},
+			Value: bits,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to send post table sync run context: %w", err)
+		}
+	}
+
+	_, err := rcstream.CloseAndReceive()
+	if err != nil {
+		return fmt.Errorf("unable to receive response from post table sync runcontext request: %w", err)
+	}
+	return nil
 }
 
 func (b *benthosBuilder) getJobById(
@@ -193,99 +216,61 @@ func (b *benthosBuilder) getJobById(
 	return getjobResp.Msg.Job, nil
 }
 
-func hasTransformer(t mgmtv1alpha1.TransformerSource) bool {
-	return t != mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_UNSPECIFIED && t != mgmtv1alpha1.TransformerSource_TRANSFORMER_SOURCE_PASSTHROUGH
-}
-
-func groupGenerateSourceOptionsByTable(
-	schemaOptions []*mgmtv1alpha1.GenerateSourceSchemaOption,
-) map[string]*generateSourceTableOptions {
-	groupedMappings := map[string]*generateSourceTableOptions{}
-
-	for idx := range schemaOptions {
-		schemaOpt := schemaOptions[idx]
-		for tidx := range schemaOpt.Tables {
-			tableOpt := schemaOpt.Tables[tidx]
-			key := neosync_benthos.BuildBenthosTable(schemaOpt.Schema, tableOpt.Table)
-			groupedMappings[key] = &generateSourceTableOptions{
-				Count: int(tableOpt.RowCount), // todo: probably need to update rowcount int64 to int32
+func buildPostTableSyncRunCtx(benthosConfigs []*benthosbuilder.BenthosConfigResponse, destinations []*mgmtv1alpha1.JobDestination) map[string]*shared.PostTableSyncConfig {
+	postTableSyncRunCtx := map[string]*shared.PostTableSyncConfig{} // benthos_config_name -> config
+	for _, bc := range benthosConfigs {
+		destConfigs := map[string]*shared.PostTableSyncDestConfig{}
+		for _, destination := range destinations {
+			var stmts []string
+			switch destination.GetOptions().GetConfig().(type) {
+			case *mgmtv1alpha1.JobDestinationOptions_PostgresOptions:
+				stmts = buildPgPostTableSyncStatement(bc)
+			case *mgmtv1alpha1.JobDestinationOptions_MssqlOptions:
+				stmts = buildMssqlPostTableSyncStatement(bc)
+			}
+			if len(stmts) != 0 {
+				destConfigs[destination.GetConnectionId()] = &shared.PostTableSyncDestConfig{
+					Statements: stmts,
+				}
+			}
+		}
+		if len(destConfigs) != 0 {
+			postTableSyncRunCtx[bc.Name] = &shared.PostTableSyncConfig{
+				DestinationConfigs: destConfigs,
 			}
 		}
 	}
-
-	return groupedMappings
+	return postTableSyncRunCtx
 }
 
-func getSqlDriverFromConnection(conn *mgmtv1alpha1.Connection) (string, error) {
-	switch conn.ConnectionConfig.Config.(type) {
-	case *mgmtv1alpha1.ConnectionConfig_PgConfig:
-		return sql_manager.PostgresDriver, nil
-	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig:
-		return sql_manager.MysqlDriver, nil
-	default:
-		return "", fmt.Errorf("unsupported sql connection config")
+func buildPgPostTableSyncStatement(bc *benthosbuilder.BenthosConfigResponse) []string {
+	statements := []string{}
+	if bc.RunType == tabledependency.RunTypeUpdate {
+		return statements
 	}
-}
-
-func groupJobSourceOptionsByTable(
-	sqlSourceOpts *sqlJobSourceOpts,
-) map[string]*sqlSourceTableOptions {
-	groupedMappings := map[string]*sqlSourceTableOptions{}
-	for _, schemaOpt := range sqlSourceOpts.SchemaOpt {
-		for tidx := range schemaOpt.Tables {
-			tableOpt := schemaOpt.Tables[tidx]
-			key := neosync_benthos.BuildBenthosTable(schemaOpt.Schema, tableOpt.Table)
-			groupedMappings[key] = &sqlSourceTableOptions{
-				WhereClause: tableOpt.WhereClause,
-			}
+	colDefaultProps := bc.ColumnDefaultProperties
+	for colName, p := range colDefaultProps {
+		if p.NeedsReset && !p.HasDefaultTransformer {
+			// resets sequences and identities
+			resetSql := sqlmanager_postgres.BuildPgIdentityColumnResetCurrentSql(bc.TableSchema, bc.TableName, colName)
+			statements = append(statements, resetSql)
 		}
 	}
-	return groupedMappings
+	return statements
 }
 
-type tableMapping struct {
-	Schema   string
-	Table    string
-	Mappings []*mgmtv1alpha1.JobMapping
-}
-
-func groupMappingsByTable(
-	mappings []*mgmtv1alpha1.JobMapping,
-) []*tableMapping {
-	groupedMappings := map[string][]*mgmtv1alpha1.JobMapping{}
-
-	for _, mapping := range mappings {
-		key := neosync_benthos.BuildBenthosTable(mapping.Schema, mapping.Table)
-		groupedMappings[key] = append(groupedMappings[key], mapping)
+func buildMssqlPostTableSyncStatement(bc *benthosbuilder.BenthosConfigResponse) []string {
+	statements := []string{}
+	if bc.RunType == tabledependency.RunTypeUpdate {
+		return statements
 	}
-
-	output := make([]*tableMapping, 0, len(groupedMappings))
-	for key, mappings := range groupedMappings {
-		schema, table := shared.SplitTableKey(key)
-		output = append(output, &tableMapping{
-			Schema:   schema,
-			Table:    table,
-			Mappings: mappings,
-		})
-	}
-	return output
-}
-
-func getTableMappingsMap(groupedMappings []*tableMapping) map[string]*tableMapping {
-	groupedTableMapping := map[string]*tableMapping{}
-	for _, tm := range groupedMappings {
-		groupedTableMapping[neosync_benthos.BuildBenthosTable(tm.Schema, tm.Table)] = tm
-	}
-	return groupedTableMapping
-}
-
-func getColumnTransformerMap(tableMappingMap map[string]*tableMapping) map[string]map[string]*mgmtv1alpha1.JobMappingTransformer {
-	colTransformerMap := map[string]map[string]*mgmtv1alpha1.JobMappingTransformer{} // schema.table ->  column -> transformer
-	for table, mapping := range tableMappingMap {
-		colTransformerMap[table] = map[string]*mgmtv1alpha1.JobMappingTransformer{}
-		for _, m := range mapping.Mappings {
-			colTransformerMap[table][m.Column] = m.Transformer
+	colDefaultProps := bc.ColumnDefaultProperties
+	for _, p := range colDefaultProps {
+		if p.NeedsOverride {
+			// reset identity
+			resetSql := sqlmanager_mssql.BuildMssqlIdentityColumnResetCurrent(bc.TableSchema, bc.TableName)
+			statements = append(statements, resetSql)
 		}
 	}
-	return colTransformerMap
+	return statements
 }

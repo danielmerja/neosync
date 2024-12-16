@@ -201,6 +201,124 @@ func (_c *MockUserAccountServiceClient_CreateTeamAccount_Call) RunAndReturn(run 
 	return _c
 }
 
+// GetAccountBillingCheckoutSession provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) GetAccountBillingCheckoutSession(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetAccountBillingCheckoutSession")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]) *connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetAccountBillingCheckoutSession'
+type MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call struct {
+	*mock.Call
+}
+
+// GetAccountBillingCheckoutSession is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]
+func (_e *MockUserAccountServiceClient_Expecter) GetAccountBillingCheckoutSession(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call {
+	return &MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call{Call: _e.mock.On("GetAccountBillingCheckoutSession", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest])) *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call) Return(_a0 *connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse], _a1 error) *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingCheckoutSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingCheckoutSessionResponse], error)) *MockUserAccountServiceClient_GetAccountBillingCheckoutSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetAccountBillingPortalSession provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) GetAccountBillingPortalSession(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetAccountBillingPortalSession")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]) *connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_GetAccountBillingPortalSession_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetAccountBillingPortalSession'
+type MockUserAccountServiceClient_GetAccountBillingPortalSession_Call struct {
+	*mock.Call
+}
+
+// GetAccountBillingPortalSession is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]
+func (_e *MockUserAccountServiceClient_Expecter) GetAccountBillingPortalSession(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call {
+	return &MockUserAccountServiceClient_GetAccountBillingPortalSession_Call{Call: _e.mock.On("GetAccountBillingPortalSession", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest])) *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call) Return(_a0 *connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse], _a1 error) *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountBillingPortalSessionRequest]) (*connect.Response[mgmtv1alpha1.GetAccountBillingPortalSessionResponse], error)) *MockUserAccountServiceClient_GetAccountBillingPortalSession_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAccountOnboardingConfig provides a mock function with given fields: _a0, _a1
 func (_m *MockUserAccountServiceClient) GetAccountOnboardingConfig(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountOnboardingConfigRequest]) (*connect.Response[mgmtv1alpha1.GetAccountOnboardingConfigResponse], error) {
 	ret := _m.Called(_a0, _a1)
@@ -260,6 +378,65 @@ func (_c *MockUserAccountServiceClient_GetAccountOnboardingConfig_Call) RunAndRe
 	return _c
 }
 
+// GetAccountStatus provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) GetAccountStatus(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]) (*connect.Response[mgmtv1alpha1.GetAccountStatusResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetAccountStatus")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.GetAccountStatusResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]) (*connect.Response[mgmtv1alpha1.GetAccountStatusResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]) *connect.Response[mgmtv1alpha1.GetAccountStatusResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.GetAccountStatusResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_GetAccountStatus_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetAccountStatus'
+type MockUserAccountServiceClient_GetAccountStatus_Call struct {
+	*mock.Call
+}
+
+// GetAccountStatus is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]
+func (_e *MockUserAccountServiceClient_Expecter) GetAccountStatus(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_GetAccountStatus_Call {
+	return &MockUserAccountServiceClient_GetAccountStatus_Call{Call: _e.mock.On("GetAccountStatus", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountStatus_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountStatusRequest])) *MockUserAccountServiceClient_GetAccountStatus_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.GetAccountStatusRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountStatus_Call) Return(_a0 *connect.Response[mgmtv1alpha1.GetAccountStatusResponse], _a1 error) *MockUserAccountServiceClient_GetAccountStatus_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetAccountStatus_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountStatusRequest]) (*connect.Response[mgmtv1alpha1.GetAccountStatusResponse], error)) *MockUserAccountServiceClient_GetAccountStatus_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAccountTemporalConfig provides a mock function with given fields: _a0, _a1
 func (_m *MockUserAccountServiceClient) GetAccountTemporalConfig(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetAccountTemporalConfigRequest]) (*connect.Response[mgmtv1alpha1.GetAccountTemporalConfigResponse], error) {
 	ret := _m.Called(_a0, _a1)
@@ -315,6 +492,65 @@ func (_c *MockUserAccountServiceClient_GetAccountTemporalConfig_Call) Return(_a0
 }
 
 func (_c *MockUserAccountServiceClient_GetAccountTemporalConfig_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.GetAccountTemporalConfigRequest]) (*connect.Response[mgmtv1alpha1.GetAccountTemporalConfigResponse], error)) *MockUserAccountServiceClient_GetAccountTemporalConfig_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetBillingAccounts provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) GetBillingAccounts(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]) (*connect.Response[mgmtv1alpha1.GetBillingAccountsResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetBillingAccounts")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.GetBillingAccountsResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]) (*connect.Response[mgmtv1alpha1.GetBillingAccountsResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]) *connect.Response[mgmtv1alpha1.GetBillingAccountsResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.GetBillingAccountsResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_GetBillingAccounts_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetBillingAccounts'
+type MockUserAccountServiceClient_GetBillingAccounts_Call struct {
+	*mock.Call
+}
+
+// GetBillingAccounts is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]
+func (_e *MockUserAccountServiceClient_Expecter) GetBillingAccounts(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_GetBillingAccounts_Call {
+	return &MockUserAccountServiceClient_GetBillingAccounts_Call{Call: _e.mock.On("GetBillingAccounts", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_GetBillingAccounts_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest])) *MockUserAccountServiceClient_GetBillingAccounts_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetBillingAccounts_Call) Return(_a0 *connect.Response[mgmtv1alpha1.GetBillingAccountsResponse], _a1 error) *MockUserAccountServiceClient_GetBillingAccounts_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_GetBillingAccounts_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.GetBillingAccountsRequest]) (*connect.Response[mgmtv1alpha1.GetBillingAccountsResponse], error)) *MockUserAccountServiceClient_GetBillingAccounts_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -673,6 +909,65 @@ func (_c *MockUserAccountServiceClient_InviteUserToTeamAccount_Call) RunAndRetur
 	return _c
 }
 
+// IsAccountStatusValid provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) IsAccountStatusValid(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]) (*connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for IsAccountStatusValid")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]) (*connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]) *connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_IsAccountStatusValid_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'IsAccountStatusValid'
+type MockUserAccountServiceClient_IsAccountStatusValid_Call struct {
+	*mock.Call
+}
+
+// IsAccountStatusValid is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]
+func (_e *MockUserAccountServiceClient_Expecter) IsAccountStatusValid(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_IsAccountStatusValid_Call {
+	return &MockUserAccountServiceClient_IsAccountStatusValid_Call{Call: _e.mock.On("IsAccountStatusValid", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_IsAccountStatusValid_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest])) *MockUserAccountServiceClient_IsAccountStatusValid_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_IsAccountStatusValid_Call) Return(_a0 *connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse], _a1 error) *MockUserAccountServiceClient_IsAccountStatusValid_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_IsAccountStatusValid_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.IsAccountStatusValidRequest]) (*connect.Response[mgmtv1alpha1.IsAccountStatusValidResponse], error)) *MockUserAccountServiceClient_IsAccountStatusValid_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // IsUserInAccount provides a mock function with given fields: _a0, _a1
 func (_m *MockUserAccountServiceClient) IsUserInAccount(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.IsUserInAccountRequest]) (*connect.Response[mgmtv1alpha1.IsUserInAccountResponse], error) {
 	ret := _m.Called(_a0, _a1)
@@ -964,6 +1259,65 @@ func (_c *MockUserAccountServiceClient_SetAccountTemporalConfig_Call) Return(_a0
 }
 
 func (_c *MockUserAccountServiceClient_SetAccountTemporalConfig_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.SetAccountTemporalConfigRequest]) (*connect.Response[mgmtv1alpha1.SetAccountTemporalConfigResponse], error)) *MockUserAccountServiceClient_SetAccountTemporalConfig_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SetBillingMeterEvent provides a mock function with given fields: _a0, _a1
+func (_m *MockUserAccountServiceClient) SetBillingMeterEvent(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]) (*connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse], error) {
+	ret := _m.Called(_a0, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetBillingMeterEvent")
+	}
+
+	var r0 *connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse]
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]) (*connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse], error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]) *connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse]); ok {
+		r0 = rf(_a0, _a1)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse])
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockUserAccountServiceClient_SetBillingMeterEvent_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetBillingMeterEvent'
+type MockUserAccountServiceClient_SetBillingMeterEvent_Call struct {
+	*mock.Call
+}
+
+// SetBillingMeterEvent is a helper method to define mock.On call
+//   - _a0 context.Context
+//   - _a1 *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]
+func (_e *MockUserAccountServiceClient_Expecter) SetBillingMeterEvent(_a0 interface{}, _a1 interface{}) *MockUserAccountServiceClient_SetBillingMeterEvent_Call {
+	return &MockUserAccountServiceClient_SetBillingMeterEvent_Call{Call: _e.mock.On("SetBillingMeterEvent", _a0, _a1)}
+}
+
+func (_c *MockUserAccountServiceClient_SetBillingMeterEvent_Call) Run(run func(_a0 context.Context, _a1 *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest])) *MockUserAccountServiceClient_SetBillingMeterEvent_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(*connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]))
+	})
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_SetBillingMeterEvent_Call) Return(_a0 *connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse], _a1 error) *MockUserAccountServiceClient_SetBillingMeterEvent_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockUserAccountServiceClient_SetBillingMeterEvent_Call) RunAndReturn(run func(context.Context, *connect.Request[mgmtv1alpha1.SetBillingMeterEventRequest]) (*connect.Response[mgmtv1alpha1.SetBillingMeterEventResponse], error)) *MockUserAccountServiceClient_SetBillingMeterEvent_Call {
 	_c.Call.Return(run)
 	return _c
 }

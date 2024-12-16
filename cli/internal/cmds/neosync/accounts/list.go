@@ -4,15 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 
 	"connectrpc.com/connect"
 	"github.com/fatih/color"
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
 	"github.com/nucleuscloud/neosync/cli/internal/auth"
-	auth_interceptor "github.com/nucleuscloud/neosync/cli/internal/connect/interceptors/auth"
-	"github.com/nucleuscloud/neosync/cli/internal/serverconfig"
+	cli_logger "github.com/nucleuscloud/neosync/cli/internal/logger"
 	"github.com/rodaine/table"
 	"github.com/spf13/cobra"
 )
@@ -27,8 +25,12 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			debugMode, err := cmd.Flags().GetBool("debug")
+			if err != nil {
+				return err
+			}
 			cmd.SilenceUsage = true
-			return listAccounts(cmd.Context(), &apiKey)
+			return listAccounts(cmd.Context(), &apiKey, debugMode)
 		},
 	}
 }
@@ -36,17 +38,17 @@ func newListCmd() *cobra.Command {
 func listAccounts(
 	ctx context.Context,
 	apiKey *string,
+	debug bool,
 ) error {
-	isAuthEnabled, err := auth.IsAuthEnabled(ctx)
+	logger := cli_logger.NewSLogger(cli_logger.GetCharmLevelOrDefault(debug))
+	httpclient, err := auth.GetNeosyncHttpClient(ctx, logger, auth.WithApiKey(apiKey))
 	if err != nil {
 		return err
 	}
+
 	userclient := mgmtv1alpha1connect.NewUserAccountServiceClient(
-		http.DefaultClient,
-		serverconfig.GetApiBaseUrl(),
-		connect.WithInterceptors(
-			auth_interceptor.NewInterceptor(isAuthEnabled, auth.AuthHeader, auth.GetAuthHeaderTokenFn(apiKey)),
-		),
+		httpclient,
+		auth.GetNeosyncUrl(),
 	)
 
 	accountsResp, err := userclient.GetUserAccounts(

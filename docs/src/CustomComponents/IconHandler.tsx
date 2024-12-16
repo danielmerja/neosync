@@ -14,6 +14,7 @@ import React, { ReactElement } from 'react';
 import {
   AiOutlineExperiment,
   AiOutlineMail,
+  AiOutlinePartition,
   AiOutlinePhone,
   AiOutlineSolution,
 } from 'react-icons/ai';
@@ -21,16 +22,27 @@ import {
   BiDownload,
   BiLogInCircle,
   BiLogoPostgresql,
+  BiNetworkChart,
   BiSolidWrench,
   BiTerminal,
 } from 'react-icons/bi';
 import { BsFunnel } from 'react-icons/bs';
-import { CiMicrochip } from 'react-icons/ci';
-import { FaAws, FaDocker, FaFolder, FaKey, FaLaptop } from 'react-icons/fa';
-import { GoLightBulb, GoSync } from 'react-icons/go';
+import { CiFilter, CiMicrochip, CiViewTable } from 'react-icons/ci';
+import { DiMongodb } from 'react-icons/di';
+import {
+  FaAws,
+  FaDocker,
+  FaFolder,
+  FaKey,
+  FaLaptop,
+  FaPython,
+} from 'react-icons/fa';
+import { GoDatabase, GoLightBulb, GoSync } from 'react-icons/go';
 
 import { GoCode, GoTable, GoVersions } from 'react-icons/go';
 import { GrAnalytics, GrMysql } from 'react-icons/gr';
+import { HiOutlineDocumentSearch } from 'react-icons/hi';
+import { IoMdCode } from 'react-icons/io';
 import { IoBuildOutline } from 'react-icons/io5';
 import {
   MdCenterFocusStrong,
@@ -38,9 +50,21 @@ import {
   MdPassword,
   MdStart,
 } from 'react-icons/md';
-import { PiArrowsSplitLight, PiFlaskLight } from 'react-icons/pi';
+import {
+  PiArrowsSplitLight,
+  PiBoundingBoxLight,
+  PiFlaskLight,
+} from 'react-icons/pi';
 import { RiOpenaiFill } from 'react-icons/ri';
-import { SiGo, SiKubernetes, SiTerraform, SiTypescript } from 'react-icons/si';
+import {
+  SiGo,
+  SiJavascript,
+  SiKubernetes,
+  SiMicrosoftsqlserver,
+  SiMongodb,
+  SiTerraform,
+  SiTypescript,
+} from 'react-icons/si';
 import { TbCloudLock, TbSdk, TbVariable } from 'react-icons/tb';
 
 export function IconHandler(name: string): ReactElement {
@@ -60,7 +84,13 @@ export function IconHandler(name: string): ReactElement {
     case 'Mysql':
       return <GrMysql />;
     case 'S3':
+    case 'DynamoDB':
+    case 'DynamoDb':
+    case 'Dynamodb':
       return <FaAws />;
+    case 'Mongo':
+    case 'MongoDB':
+      return <DiMongodb />;
     case 'Email':
       return <AiOutlineMail />;
     case 'Phone (integer)':
@@ -148,6 +178,34 @@ export function IconHandler(name: string): ReactElement {
       return <AiOutlineSolution />;
     case 'Core Features':
       return <MdCenterFocusStrong />;
+    case 'Connect Postgres via Bastion Host':
+      return <BiLogoPostgresql />;
+    case 'Syncing data with MongoDB':
+      return <SiMongodb />;
+    case 'Neosync IP Ranges':
+      return <BiNetworkChart />;
+    case 'Custom Code Transformers':
+      return <IoMdCode />;
+    case 'Javascript':
+      return <SiJavascript />;
+    case 'Foreign Keys':
+      return <CiViewTable />;
+    case 'Foreign Keys':
+      return <CiViewTable />;
+    case 'Virtual Foreign Keys':
+      return <AiOutlinePartition />;
+    case 'Circular Dependencies':
+      return <PiBoundingBoxLight />;
+    case 'Subsetting':
+      return <CiFilter />;
+    case 'Database Setup':
+      return <GoDatabase />;
+    case 'Viewing Job Run Logs':
+      return <HiOutlineDocumentSearch />;
+    case 'Microsoft SQL Server':
+      return <SiMicrosoftsqlserver />;
+    case 'Python':
+      return <FaPython />;
     default:
       return <LayersIcon />;
   }

@@ -8,7 +8,9 @@
         compose/up compose/down \
         compose/auth/up compose/auth/down \
         compose/dev/up compose/dev/down \
-        compose/dev/auth/up compose/dev/auth/down
+        compose/dev/auth/up compose/dev/auth/down \
+				helm/docs \
+				generate/backend
 default: help
 
 help:
@@ -18,7 +20,7 @@ help:
 PROD_COMPOSE_FILE = compose.yml
 PROD_AUTH_COMPOSE_FILE = compose.auth.yml
 DEV_COMPOSE_FILE = compose.dev.yml
-DEV_AUTH_COMPOSE_FILE = compose.auth.dev.yml
+DEV_AUTH_COMPOSE_FILE = compose.auth.yml
 
 # Cluster Management
 cluster/create: ## Creates a local K8s Cluster
@@ -30,18 +32,22 @@ cluster/destroy: ## Destroys a local K8s Cluster
 
 # Building
 build: ## Builds the project (except the frontend)
-	make build/backend &
-	make build/worker &
-	make build/cli &
-	make install/frontend &
-	wait
+	( \
+	make build/backend & \
+	make build/worker & \
+	make build/cli & \
+	make install/frontend & \
+	wait \
+	)
 
 dbuild: ## Builds the project specifically for Linux
-	make dbuild/backend &
-	make dbuild/worker &
-	make dbuild/cli &
-	make install/frontend &
-	wait
+	( \
+	make dbuild/backend & \
+	make dbuild/worker & \
+	make dbuild/cli & \
+	make install/frontend & \
+	wait \
+	)
 
 build/backend: ## Builds the backend
 	@cd ./backend && make build
@@ -67,11 +73,16 @@ install/frontend: ## Runs npm install for the frontend
 build/frontend: ## Builds the frontend (don't do this if intending to develop locally)
 	@cd ./frontend && npm run build
 
+generate/backend: ## Runs the backend generate script
+	@cd ./backend && make gen
+
 # Linting
 lint: ## Lints the project
-	make lint/go &
-	make lint/frontend &
-	wait
+	( \
+	make lint/go & \
+	make lint/frontend & \
+	wait \
+	)
 
 lint/go: ## Lints the Go Module
 	golangci-lint run
@@ -81,10 +92,12 @@ lint/frontend: ## Lints the frontend
 
 # Cleaning
 clean: ## Cleans the project
-	make clean/backend &
-	make clean/worker &
-	make clean/cli &
-	wait
+	( \
+	make clean/backend & \
+	make clean/worker & \
+	make clean/cli & \
+	wait \
+	)
 
 clean/backend: ## Cleans the backend
 	@cd ./backend && make clean
@@ -97,25 +110,28 @@ clean/cli: ## Cleans the CLI
 
 # Compose Management
 compose/up: ## Composes up the production environment
-	docker compose -f $(PROD_COMPOSE_FILE) up -d
+	BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose -f $(PROD_COMPOSE_FILE) up -d
 
 compose/down: ## Composes down the production environment
 	docker compose -f $(PROD_COMPOSE_FILE) down
 
 compose/auth/up: ## Composes up the production environment with auth
-	docker compose -f $(PROD_COMPOSE_FILE) -f $(PROD_AUTH_COMPOSE_FILE) up -d
+	BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose -f $(PROD_COMPOSE_FILE) -f $(PROD_AUTH_COMPOSE_FILE) up -d
 
 compose/auth/down: ## Composes down the production environment with auth
 	docker compose -f $(PROD_COMPOSE_FILE) -f $(PROD_AUTH_COMPOSE_FILE) down
 
-compose/dev/up: ## Composes up the development environment. Must run dbuild first.
-	docker compose -f $(DEV_COMPOSE_FILE) watch
+compose/dev/up: ## Composes up the development environment.
+	BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose -f $(DEV_COMPOSE_FILE) up -d
 
 compose/dev/down: ## Composes down the development environment
 	docker compose -f $(DEV_COMPOSE_FILE) down
 
-compose/dev/auth/up: ## Composes up the development environment with auth. Must run dbuild first.
-	docker compose -f $(DEV_COMPOSE_FILE) -f $(DEV_AUTH_COMPOSE_FILE) watch
+compose/dev/auth/up: ## Composes up the development environment with auth.
+	BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose -f $(DEV_COMPOSE_FILE) -f $(DEV_AUTH_COMPOSE_FILE) up -d
 
 compose/dev/auth/down: ## Composes down the development environment with auth
 	docker compose -f $(DEV_COMPOSE_FILE) -f $(DEV_AUTH_COMPOSE_FILE) down
+
+helm/docs: ## Generates documentation for the repository's helm charts.
+	./scripts/gen-helmdocs.sh

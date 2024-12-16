@@ -23,49 +23,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useToast } from '@/components/ui/use-toast';
 import { cn } from '@/libs/utils';
 import { getErrorMessage } from '@/util/util';
-import { RESOURCE_NAME_REGEX } from '@/yup-validations/connections';
+import { ApiKeyFormValues } from '@/yup-validations/apikey';
 import { Timestamp } from '@bufbuild/protobuf';
+import { useMutation } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
-import {
-  CreateAccountApiKeyRequest,
-  CreateAccountApiKeyResponse,
-  GetAccountApiKeyResponse,
-} from '@neosync/sdk';
+import { createAccountApiKey } from '@neosync/sdk/connectquery';
 import { CalendarIcon } from '@radix-ui/react-icons';
 import { PopoverTrigger } from '@radix-ui/react-popover';
 import { addDays } from 'date-fns';
 import { useRouter } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement } from 'react';
 import { useForm } from 'react-hook-form';
-import { mutate } from 'swr';
-import * as Yup from 'yup';
-
-const FORM_SCHEMA = Yup.object({
-  name: Yup.string()
-    .required()
-    .min(3)
-    .max(30)
-    .test(
-      'validApiKeyName',
-      'API Key Name must be at least 3 characters long and can only include lowercase letters, numbers, and hyphens.',
-      (value) => {
-        if (!value || value.length < 3) {
-          return false;
-        }
-        if (!RESOURCE_NAME_REGEX.test(value)) {
-          return false;
-        }
-        // todo: add server-side check to see if it's available on the backend
-        return true;
-      }
-    ),
-  expiresAtSelect: Yup.string().oneOf(['7', '30', '60', '90', 'custom']),
-  expiresAt: Yup.date().required(),
-});
-type FormValues = Yup.InferType<typeof FORM_SCHEMA>;
+import { toast } from 'sonner';
 
 export interface ApiKeyValueSessionStore {
   keyValue: string;
@@ -73,24 +45,31 @@ export interface ApiKeyValueSessionStore {
 
 export default function NewApiKeyForm(): ReactElement {
   const { account } = useAccount();
-  const { toast } = useToast();
   const router = useRouter();
-  const form = useForm<FormValues>({
+  const form = useForm<ApiKeyFormValues>({
     mode: 'onChange',
-    resolver: yupResolver(FORM_SCHEMA),
+    resolver: yupResolver(ApiKeyFormValues),
     defaultValues: {
       name: '',
       expiresAtSelect: '7',
       expiresAt: startOfDay(addDays(new Date(), 7)),
     },
   });
+  const posthog = usePostHog();
+  const { mutateAsync } = useMutation(createAccountApiKey);
 
-  async function onSubmit(values: FormValues): Promise<void> {
+  async function onSubmit(values: ApiKeyFormValues): Promise<void> {
     if (!account) {
       return;
     }
     try {
-      const apiKey = await createNewApiKey(values, account.id);
+      const apiKey = await mutateAsync({
+        accountId: account.id,
+        expiresAt: new Timestamp({
+          seconds: BigInt(values.expiresAt.getTime() / 1000),
+        }),
+        name: values.name,
+      });
       if (apiKey.apiKey?.id) {
         if (apiKey.apiKey.keyValue && !!window?.sessionStorage) {
           const storeVal: ApiKeyValueSessionStore = {
@@ -102,25 +81,15 @@ export default function NewApiKeyForm(): ReactElement {
           );
         }
         router.push(`/${account?.name}/settings/api-keys/${apiKey.apiKey.id}`);
-        mutate(
-          `/api/api-keys/account/${apiKey.apiKey.id}`,
-          new GetAccountApiKeyResponse({
-            apiKey: apiKey.apiKey,
-          })
-        );
       } else {
         router.push(`/${account?.name}/settings/api-keys`);
       }
-      toast({
-        title: 'Successfully created API key!',
-        variant: 'success',
-      });
+      posthog.capture('New API Key Created');
+      toast.success('Successfully created API key!');
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create api key',
+      toast.error('Unable to create api key', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -256,30 +225,4 @@ export default function NewApiKeyForm(): ReactElement {
       </form>
     </Form>
   );
-}
-
-async function createNewApiKey(
-  formData: FormValues,
-  accountId: string
-): Promise<CreateAccountApiKeyResponse> {
-  const body = new CreateAccountApiKeyRequest({
-    accountId,
-    name: formData.name,
-    expiresAt: new Timestamp({
-      seconds: BigInt(formData.expiresAt.getTime() / 1000),
-    }),
-  });
-
-  const res = await fetch(`/api/accounts/${accountId}/api-keys`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateAccountApiKeyResponse.fromJson(await res.json());
 }

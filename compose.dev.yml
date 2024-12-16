@@ -6,14 +6,16 @@ include:
       - ./compose/temporal/.env
   - path: ./compose/compose-db.yml
   # - path: ./compose/compose-db-mysql.yml
+  # - path: ./compose/compose-db-mongo.yml
+  # - path: ./compose/compose-db-dynamo.yml
+  # - path: ./compose/compose-db-mssql.yml
 
 services:
   app:
     container_name: neosync-app
-    image: neosync-app
     build:
-      context: ./frontend
-      dockerfile: ./apps/web/dev/build/Dockerfile.dev
+      context: ./
+      dockerfile: ./frontend/apps/web/dev/build/Dockerfile.dev
     ports:
       - 3000:3000
     environment:
@@ -28,19 +30,16 @@ services:
 
       - AUTH_ENABLED=false
 
+    env_file:
+      - path: ./.env.app.local
+        required: false
     networks:
       - neosync-network
-    develop:
-      watch:
-        - path: frontend/package.json
-          action: rebuild
-        - path: frontend/package-lock.json
-          action: rebuild
-        - path: frontend/
-          action: sync
-          target: /app
-          ignore:
-            - frontend/node_modules/
+    volumes:
+      - ./frontend:/app/:rw
+      - neosync_app_nodemodules:/app/node_modules
+      - neosync_web_nodemodules:/app/apps/web/node_modules
+      - neosync_sdk_nodemodules:/app/packages/sdk/node_modules
 
   db:
     container_name: neosync-db
@@ -64,20 +63,18 @@ services:
 
   api:
     container_name: neosync-api
-    image: neosync-api
     build:
-      context: ./backend
-      dockerfile: ./dev/build/Dockerfile.dev
+      context: ./
+      dockerfile: ./backend/dev/build/Dockerfile.dev
     ports:
       - 8080:8080
-    command: serve connect
     environment:
       - HOST=0.0.0.0
       - PORT=8080
       - NUCLEUS_ENV=dev
       - TEMPORAL_URL=temporal:7233
       - DB_AUTO_MIGRATE=true
-      - DB_SCHEMA_DIR=/app/migrations
+      - DB_SCHEMA_DIR=/workspace/backend/sql/postgresql/schema
       - DB_HOST=db
       - DB_PORT=5432
       - DB_NAME=nucleus
@@ -86,30 +83,38 @@ services:
       - DB_SSL_DISABLE=true
       - DB_MIGRATIONS_TABLE=neosync_api_schema_migrations
       - DB_MIGRATIONS_TABLE_QUOTED=false
+      - LOG_LEVEL=DEBUG
+
+      - DB_LOG_LEVEL=ERROR
 
       - AUTH_ENABLED=false
 
+    env_file:
+      - path: ./.env.api.local
+        required: false
     networks:
       - neosync-network
       - temporal-network
-
     depends_on:
       db:
         condition: service_healthy
         restart: true
-    develop:
-      watch:
-        - path: backend/bin
-          action: rebuild
-          target: /app
+    volumes:
+      - ./backend:/workspace/backend:rw
+      - ./worker:/workspace/worker:rw
+      - ./internal:/workspace/internal:rw
+      - ./go.mod:/workspace/go.mod:rw
+      - ./go.sum:/workspace/go.sum:rw
+      - neosync_api_tmp:/workspace/tmp
+      - neosync_go_mod_cache:/go/pkg/mod
+      - neosync_backend_build_cache:/root/.cache/go-build
     restart: on-failure
 
   worker:
     container_name: neosync-worker
-    image: neosync-worker
     build:
-      context: ./worker
-      dockerfile: ./dev/build/Dockerfile.dev
+      context: ./
+      dockerfile: ./worker/dev/build/Dockerfile.dev
     environment:
       - NUCLEUS_ENV=dev
       - TEMPORAL_URL=temporal:7233
@@ -117,15 +122,24 @@ services:
       - TEMPORAL_TASK_QUEUE=sync-job
       - NEOSYNC_URL=http://api:8080
       - REDIS_URL=redis://default:foofar@redis:6379
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=DEBUG
+      - DB_LOG_LEVEL=ERROR
     networks:
       - neosync-network
       - temporal-network
-    develop:
-      watch:
-        - path: worker/bin
-          action: rebuild
-          target: /app
+    depends_on:
+      temporal:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - ./backend:/workspace/backend:rw
+      - ./worker:/workspace/worker:rw
+      - ./internal:/workspace/internal:rw
+      - ./go.mod:/workspace/go.mod:rw
+      - ./go.sum:/workspace/go.sum:rw
+      - neosync_worker_tmp:/workspace/tmp
+      - neosync_go_mod_cache:/go/pkg/mod
+      - neosync_worker_build_cache:/root/.cache/go-build
     restart: on-failure
 
   redis:
@@ -142,6 +156,14 @@ services:
 volumes:
   neosync_redis_cache:
   neosync_pg_data:
+  neosync_api_tmp:
+  neosync_backend_build_cache:
+  neosync_worker_tmp:
+  neosync_worker_build_cache:
+  neosync_go_mod_cache:
+  neosync_app_nodemodules:
+  neosync_web_nodemodules:
+  neosync_sdk_nodemodules:
 
 networks:
   neosync-network:

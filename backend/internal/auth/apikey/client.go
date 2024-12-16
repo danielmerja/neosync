@@ -12,6 +12,7 @@ import (
 	"github.com/nucleuscloud/neosync/backend/internal/apikey"
 	nucleuserrors "github.com/nucleuscloud/neosync/backend/internal/errors"
 	"github.com/nucleuscloud/neosync/backend/internal/utils"
+	pkg_utils "github.com/nucleuscloud/neosync/backend/pkg/utils"
 )
 
 type TokenContextKey struct{}
@@ -57,7 +58,7 @@ func (c *Client) InjectTokenCtx(ctx context.Context, header http.Header, spec co
 	}
 
 	if apikey.IsValidV1AccountKey(token) {
-		hashedKeyValue := utils.ToSha256(
+		hashedKeyValue := pkg_utils.ToSha256(
 			token,
 		)
 		apiKey, err := c.q.GetAccountApiKeyByKeyValue(ctx, c.db, hashedKeyValue)
@@ -69,21 +70,19 @@ func (c *Client) InjectTokenCtx(ctx context.Context, header http.Header, spec co
 			return nil, ApiKeyExpiredErr
 		}
 
-		newctx := context.WithValue(ctx, TokenContextKey{}, &TokenContextData{
+		return SetTokenData(ctx, &TokenContextData{
 			RawToken:   token,
 			ApiKey:     &apiKey,
 			ApiKeyType: apikey.AccountApiKey,
-		})
-		return newctx, nil
+		}), nil
 	} else if apikey.IsValidV1WorkerKey(token) &&
 		isApiKeyAllowed(c.allowedWorkerApiKeys, token) &&
 		isProcedureAllowed(c.allowedWorkerProcedures, spec.Procedure) {
-		newctx := context.WithValue(ctx, TokenContextKey{}, &TokenContextData{
+		return SetTokenData(ctx, &TokenContextData{
 			RawToken:   token,
 			ApiKey:     nil,
 			ApiKeyType: apikey.WorkerApiKey,
-		})
-		return newctx, nil
+		}), nil
 	}
 	return nil, InvalidApiKeyErr
 }
@@ -93,8 +92,11 @@ func GetTokenDataFromCtx(ctx context.Context) (*TokenContextData, error) {
 	if !ok {
 		return nil, nucleuserrors.NewUnauthenticated("ctx does not contain TokenContextData or unable to cast struct")
 	}
-
 	return data, nil
+}
+
+func SetTokenData(ctx context.Context, data *TokenContextData) context.Context {
+	return context.WithValue(ctx, TokenContextKey{}, data)
 }
 
 func isApiKeyAllowed(allowedKeys []string, key string) bool {

@@ -15,10 +15,10 @@ import {
 import { ReactElement, useMemo } from 'react';
 import { IoWarning } from 'react-icons/io5';
 import Spinner from '../Spinner';
-import LearnMoreTag from '../labels/LearnMoreTag';
+import LearnMoreLink from '../labels/LearnMoreLink';
 import { Button } from '../ui/button';
 import PermissionsDataTable from './PermissionsDataTable';
-import { getPermissionColumns } from './columns';
+import { PermissionConnectionType, getPermissionColumns } from './columns';
 
 interface Props {
   checkResponse: PlainMessage<CheckConnectionConfigResponse>;
@@ -26,6 +26,7 @@ interface Props {
   setOpenPermissionDialog(open: boolean): void;
   isValidating: boolean;
   connectionName: string;
+  connectionType: PermissionConnectionType;
 }
 
 export default function PermissionsDialog(props: Props): ReactElement {
@@ -35,9 +36,13 @@ export default function PermissionsDialog(props: Props): ReactElement {
     connectionName,
     checkResponse,
     isValidating,
+    connectionType,
   } = props;
 
-  const columns = useMemo(() => getPermissionColumns(), []);
+  const columns = useMemo(
+    () => getPermissionColumns(connectionType),
+    [connectionType]
+  );
 
   return (
     <Dialog open={openPermissionDialog} onOpenChange={setOpenPermissionDialog}>
@@ -49,10 +54,9 @@ export default function PermissionsDialog(props: Props): ReactElement {
           </div>
           <div className="text-muted-foreground text-sm">
             Review the permissions that Neosync needs for your connection.{' '}
-            <LearnMoreTag href="https://docs.neosync.dev/connections/postgres#permissions" />
+            <LearnMoreLink href="https://docs.neosync.dev/connections/postgres#permissions" />{' '}
           </div>
         </DialogHeader>
-
         <PermissionsDataTable
           ConnectionAlert={
             <TestConnectionResult
@@ -64,7 +68,7 @@ export default function PermissionsDialog(props: Props): ReactElement {
           data={checkResponse.privileges}
           columns={columns}
         />
-        <DialogFooter className="pt-6">
+        <DialogFooter className="pt-28">
           <div className="flex justify-end">
             <Button
               type="button"
@@ -99,7 +103,7 @@ export function TestConnectionResult(
   } else if (isConnected) {
     return (
       <SuccessAlert
-        description={`Successfully connected to connection: ${connectionName}!`}
+        description={`Successfully connected to: ${connectionName}!`}
       />
     );
   }

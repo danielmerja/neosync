@@ -13,11 +13,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useToast } from '@/components/ui/use-toast';
 import { getErrorMessage } from '@/util/util';
+import { useMutation } from '@connectrpc/connect-query';
 import { Connection, ConnectionConfig } from '@neosync/sdk';
+import { deleteConnection } from '@neosync/sdk/connectquery';
 import { useRouter } from 'next/navigation';
-import { getConnectionType } from '../../util';
+import { toast } from 'sonner';
+import { getConnectionUrlSlugName } from '../../util';
 
 interface DataTableRowActionsProps<TData> {
   row: Row<TData>;
@@ -31,22 +33,17 @@ export function DataTableRowActions<TData>({
   const connection = row.original as Connection;
   const router = useRouter();
   const { account } = useAccount();
-  const { toast } = useToast();
+  const { mutateAsync } = useMutation(deleteConnection);
 
   async function onDelete(): Promise<void> {
     try {
-      await removeConnection(account?.id ?? '', connection.id);
-      toast({
-        title: 'Connection removed successfully!',
-        variant: 'success',
-      });
+      await mutateAsync({ id: connection.id });
+      toast.success('Connection removed successfully!');
       onDeleted();
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove connection',
+      toast.error('Unable to remove connection', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -76,7 +73,7 @@ export function DataTableRowActions<TData>({
           className="cursor-pointer"
           onClick={() =>
             router.push(
-              `/${account?.name}/new/connection/${getConnectionType(connection.connectionConfig ?? new ConnectionConfig())}?sourceId=${connection.id}`
+              `/${account?.name}/new/connection/${getConnectionUrlSlugName(connection.connectionConfig ?? new ConnectionConfig())}?sourceId=${connection.id}`
             )
           }
         >
@@ -99,21 +96,4 @@ export function DataTableRowActions<TData>({
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-async function removeConnection(
-  accountId: string,
-  connectionId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/connections/${connectionId}`,
-    {
-      method: 'DELETE',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
 }

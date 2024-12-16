@@ -14,40 +14,46 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { useToast } from '@/components/ui/use-toast';
-import {
-  buildGetConnectionRouteKey,
-  getConnection,
-} from '@/libs/hooks/useGetConnection';
 import { getErrorMessage } from '@/util/util';
-import { OpenAiFormValues } from '@/yup-validations/connections';
-import { yupResolver } from '@hookform/resolvers/yup';
 import {
-  ConnectionConfig,
-  CreateConnectionRequest,
-  CreateConnectionResponse,
-  GetConnectionResponse,
-  OpenAiConnectionConfig,
-} from '@neosync/sdk';
+  CreateConnectionFormContext,
+  OpenAiFormValues,
+} from '@/yup-validations/connections';
+import { createConnectQueryKey, useMutation } from '@connectrpc/connect-query';
+import { yupResolver } from '@hookform/resolvers/yup';
+import { GetConnectionResponse } from '@neosync/sdk';
+import {
+  createConnection,
+  getConnection,
+  isConnectionNameAvailable,
+} from '@neosync/sdk/connectquery';
 import { ExternalLinkIcon } from '@radix-ui/react-icons';
+import { useQueryClient } from '@tanstack/react-query';
 import NextLink from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import { mutate } from 'swr';
+import { toast } from 'sonner';
+import { buildConnectionConfigOpenAi } from '../../../connections/util';
 
 interface Props {}
 
 export default function OpenAiForm(props: Props): ReactElement {
   const {} = props;
   const { account } = useAccount();
-  const { toast } = useToast();
   const searchParams = useSearchParams();
   const sourceConnId = searchParams.get('sourceId');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const router = useRouter();
-
-  const form = useForm<OpenAiFormValues>({
+  const posthog = usePostHog();
+  const { mutateAsync: createOpenAiConnection } = useMutation(createConnection);
+  const queryclient = useQueryClient();
+  const { mutateAsync: getOpenAiConnection } = useMutation(getConnection);
+  const { mutateAsync: isConnectionNameAvailableAsync } = useMutation(
+    isConnectionNameAvailable
+  );
+  const form = useForm<OpenAiFormValues, CreateConnectionFormContext>({
     resolver: yupResolver(OpenAiFormValues),
     mode: 'onChange',
     defaultValues: {
@@ -57,7 +63,10 @@ export default function OpenAiForm(props: Props): ReactElement {
         apiKey: '',
       },
     },
-    context: { accountId: account?.id ?? '' },
+    context: {
+      accountId: account?.id ?? '',
+      isConnectionNameAvailable: isConnectionNameAvailableAsync,
+    },
   });
 
   async function onSubmit(values: OpenAiFormValues): Promise<void> {
@@ -66,21 +75,20 @@ export default function OpenAiForm(props: Props): ReactElement {
     }
 
     try {
-      const connectionResp = await createOpenAiConnection(account.id, values);
-      toast({
-        title: 'Successfully created OpenAI Connection!',
-        variant: 'success',
+      const connectionResp = await createOpenAiConnection({
+        name: values.connectionName,
+        accountId: account.id,
+        connectionConfig: buildConnectionConfigOpenAi(values),
       });
-
-      mutate(
-        buildGetConnectionRouteKey(
-          account.id,
-          connectionResp.connection?.id ?? ''
-        ),
-        new GetConnectionResponse({
-          connection: connectionResp.connection,
-        })
+      toast.success('Successfully created OpenAI Connection!');
+      queryclient.setQueryData(
+        createConnectQueryKey(getConnection, {
+          id: connectionResp.connection?.id,
+        }),
+        new GetConnectionResponse({ connection: connectionResp.connection })
       );
+
+      posthog.capture('New Connection Created', { type: 'openai' });
       const returnTo = searchParams.get('returnTo');
       if (returnTo) {
         router.push(returnTo);
@@ -91,10 +99,8 @@ export default function OpenAiForm(props: Props): ReactElement {
       }
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create OpenAI Connection',
+      toast.error('Unable to create OpenAI Connection', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -109,7 +115,9 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
       }
       setIsLoading(true);
       try {
-        const connData = await getConnection(account.id, sourceConnId);
+        const connData = await getOpenAiConnection({
+          id: sourceConnId,
+        });
 
         if (
           connData &&
@@ -129,9 +137,8 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
       } catch (error) {
         console.error('Failed to fetch connection data:', error);
         setIsLoading(false);
-        toast({
-          title: 'Unable to clone connection!',
-          variant: 'destructive',
+        toast.error('Unable to clone connection!', {
+          description: getErrorMessage(error),
         });
       } finally {
         setIsLoading(false);
@@ -201,13 +208,12 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
                 The api key to the API server. If you do not know how to create
                 an OpenAI Key, navigate to their{' '}
                 <NextLink
+                  className="hover:underline inline-flex gap-1 flex-row items-center"
                   href="https://platform.openai.com/docs/quickstart/account-setup"
                   target="_blank"
                 >
-                  <div className="inline-flex gap-1 flex-row">
-                    <p>Account Setup Docs</p>
-                    <ExternalLinkIcon className="text-gray-800 w-4 h-4" />
-                  </div>
+                  Account Setup Docs
+                  <ExternalLinkIcon className="text-gray-800 w-4 h-4" />
                 </NextLink>{' '}
                 to learn how to do so.{' '}
               </FormDescription>
@@ -225,36 +231,4 @@ the hook in the useEffect conditionally. This is used to retrieve the values for
       </form>
     </Form>
   );
-}
-
-async function createOpenAiConnection(
-  accountId: string,
-  values: OpenAiFormValues
-): Promise<CreateConnectionResponse> {
-  const res = await fetch(`/api/accounts/${accountId}/connections`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(
-      new CreateConnectionRequest({
-        accountId,
-        name: values.connectionName,
-        connectionConfig: new ConnectionConfig({
-          config: {
-            case: 'openaiConfig',
-            value: new OpenAiConnectionConfig({
-              apiUrl: values.sdk.url,
-              apiKey: values.sdk.apiKey,
-            }),
-          },
-        }),
-      })
-    ),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateConnectionResponse.fromJson(await res.json());
 }

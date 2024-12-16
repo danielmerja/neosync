@@ -1,9 +1,11 @@
 'use client';
 import ButtonText from '@/components/ButtonText';
+import SubPageHeader from '@/components/headers/SubPageHeader';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonTable from '@/components/skeleton/SkeletonTable';
 import { Button } from '@/components/ui/button';
-import { useGetAccountApiKeys } from '@/libs/hooks/useGetAccountApiKeys';
+import { useQuery } from '@connectrpc/connect-query';
+import { getAccountApiKeys } from '@neosync/sdk/connectquery';
 import { PlusIcon } from '@radix-ui/react-icons';
 import Link from 'next/link';
 import { ReactElement, useMemo } from 'react';
@@ -12,12 +14,13 @@ import { DataTable } from './components/ApiKeysTable/data-table';
 
 export default function ApiKeys(): ReactElement {
   return (
-    <div>
-      <div className="flex justify-between">
-        <h1 className="text-xl font-bold tracking-tight">API Keys</h1>
-        <NewApiKeyButton />
-      </div>
-      <div className="mt-10">
+    <div className="flex flex-col gap-5">
+      <SubPageHeader
+        header="API Keys"
+        description="Create and manage API keys"
+        extraHeading={<NewApiKeyButton />}
+      />
+      <div>
         <ApiKeyTable />
       </div>
     </div>
@@ -28,14 +31,19 @@ interface ApiKeyTableProps {}
 function ApiKeyTable(props: ApiKeyTableProps): ReactElement {
   const {} = props;
   const { account } = useAccount();
-  const { isLoading, data, mutate } = useGetAccountApiKeys(account?.id ?? '');
+
+  const { data, isLoading, refetch } = useQuery(
+    getAccountApiKeys,
+    { accountId: account?.id ?? '' },
+    { enabled: !!account?.id }
+  );
 
   const columns = useMemo(
     () =>
       getColumns({
         accountName: account?.name ?? '',
         onDeleted() {
-          mutate();
+          refetch();
         },
       }),
     [account?.name ?? '']

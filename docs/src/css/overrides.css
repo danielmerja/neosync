@@ -78,6 +78,12 @@ html[data-theme='dark'] {
   ul {
     @apply list-inside list-disc mb-8;
   }
+  ul ul,
+  ul ol,
+  ol ol,
+  ol ul {
+    @apply ml-6;
+  }
 }
 
 /*
@@ -93,12 +99,21 @@ this is the class for the sidebar categories that section headers
   @apply no-underline;
 }
 
+/* must override this because we need to add marging to all base ul and ol's */
+.table-of-contents ul {
+  @apply m-0;
+}
+
 .pagination-nav__link--prev {
   @apply no-underline;
 }
 
 .pagination-nav__link {
   @apply no-underline;
+}
+
+.breadcrumbs {
+  @apply flex flex-row gap-4;
 }
 
 .breadcrumbs__item {
@@ -121,16 +136,8 @@ this is the class for the sidebar categories that section headers
     @apply text-gray-900 cursor-pointer text-sm rounded-full;
   }
 
-  .breadcrumbs__link {
-    @apply py-1;
-  }
-
   .transformer-page-header {
     @apply flex flex-row gap-4 font-bold text-3xl items-center;
-  }
-
-  .heroImage {
-    @apply py-10;
   }
 
   .menu__list-item {
@@ -277,11 +284,19 @@ img {
   @apply border border-gray-300 dark:border-gray-700 shadow-lg rounded-lg overflow-hidden my-6;
 }
 
+.navbar__logo {
+  @apply flex w-[84px] h-[20px];
+}
+
 .navbar__logo img {
   @apply border-none shadow-none my-0 rounded-none;
 }
 
 pre {
+  @apply text-sm;
+}
+
+code {
   @apply text-sm;
 }
 
@@ -295,4 +310,12 @@ table {
 
 header h2 a {
   @apply text-3xl no-underline text-black;
+}
+
+.theme-edit-this-page {
+  @apply flex flex-row items-center text-sm;
+}
+
+.breadcrumbs__link {
+  @apply py-1 px-2;
 }

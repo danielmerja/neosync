@@ -2,54 +2,23 @@ package genbenthosconfigs_activity
 
 import (
 	"context"
-	"sync"
 	"time"
 
-	mysql_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/mysql"
-	pg_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/postgresql"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
-	"github.com/nucleuscloud/neosync/backend/pkg/metrics"
-	"github.com/nucleuscloud/neosync/backend/pkg/sqlconnect"
 	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
-	tabledependency "github.com/nucleuscloud/neosync/backend/pkg/table-dependency"
-	neosync_benthos "github.com/nucleuscloud/neosync/worker/internal/benthos"
-	logger_utils "github.com/nucleuscloud/neosync/worker/internal/logger"
+	benthosbuilder "github.com/nucleuscloud/neosync/internal/benthos/benthos-builder"
+	temporallogger "github.com/nucleuscloud/neosync/worker/internal/temporal-logger"
 	"github.com/nucleuscloud/neosync/worker/pkg/workflows/datasync/activities/shared"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/log"
 )
 
 type GenerateBenthosConfigsRequest struct {
-	JobId      string
-	WorkflowId string
+	JobId string
 }
 type GenerateBenthosConfigsResponse struct {
-	BenthosConfigs []*BenthosConfigResponse
-}
-
-type BenthosRedisConfig struct {
-	Key    string
-	Table  string // schema.table
-	Column string
-}
-
-type BenthosConfigResponse struct {
-	Name           string
-	DependsOn      []*tabledependency.DependsOn
-	RunType        tabledependency.RunType
-	Config         *neosync_benthos.BenthosConfig
-	TableSchema    string
-	TableName      string
-	Columns        []string
-	RedisDependsOn map[string][]string
-
-	Processors  []*neosync_benthos.ProcessorConfig
-	BenthosDsns []*shared.BenthosDsn
-	RedisConfig []*BenthosRedisConfig
-
-	primaryKeys []string
-
-	metriclabels metrics.MetricLabels
+	BenthosConfigs []*benthosbuilder.BenthosConfigResponse
+	AccountId      string
 }
 
 type Activity struct {
@@ -57,12 +26,9 @@ type Activity struct {
 	connclient        mgmtv1alpha1connect.ConnectionServiceClient
 	transformerclient mgmtv1alpha1connect.TransformersServiceClient
 
-	sqlconnector sqlconnect.SqlConnector
+	sqlmanager sql_manager.SqlManagerClient
 
 	redisConfig *shared.RedisConfig
-
-	pgquerier    pg_queries.Querier
-	mysqlquerier mysql_queries.Querier
 
 	metricsEnabled bool
 }
@@ -71,7 +37,7 @@ func New(
 	jobclient mgmtv1alpha1connect.JobServiceClient,
 	connclient mgmtv1alpha1connect.ConnectionServiceClient,
 	transformerclient mgmtv1alpha1connect.TransformersServiceClient,
-	sqlconnector sqlconnect.SqlConnector,
+	sqlmanager sql_manager.SqlManagerClient,
 	redisConfig *shared.RedisConfig,
 	metricsEnabled bool,
 ) *Activity {
@@ -79,10 +45,8 @@ func New(
 		jobclient:         jobclient,
 		connclient:        connclient,
 		transformerclient: transformerclient,
-		sqlconnector:      sqlconnector,
+		sqlmanager:        sqlmanager,
 		redisConfig:       redisConfig,
-		pgquerier:         pg_queries.New(),
-		mysqlquerier:      mysql_queries.New(),
 		metricsEnabled:    metricsEnabled,
 	}
 }
@@ -101,7 +65,6 @@ func (a *Activity) GenerateBenthosConfigs(
 		activity.GetLogger(ctx),
 		loggerKeyVals...,
 	)
-	_ = logger
 	go func() {
 		for {
 			select {
@@ -115,21 +78,17 @@ func (a *Activity) GenerateBenthosConfigs(
 		}
 	}()
 
-	pgpoolmap := &sync.Map{}
-	mysqlpoolmap := &sync.Map{}
-
-	sqlmanager := sql_manager.NewSqlManager(pgpoolmap, a.pgquerier, mysqlpoolmap, a.mysqlquerier, a.sqlconnector)
-
 	bbuilder := newBenthosBuilder(
-		sqlmanager,
+		a.sqlmanager,
 		a.jobclient,
 		a.connclient,
 		a.transformerclient,
 		req.JobId,
+		info.WorkflowExecution.ID,
 		info.WorkflowExecution.RunID,
 		a.redisConfig,
 		a.metricsEnabled,
 	)
-	slogger := logger_utils.NewJsonSLogger().With(loggerKeyVals...)
-	return bbuilder.GenerateBenthosConfigs(ctx, req, slogger)
+	slogger := temporallogger.NewSlogger(logger)
+	return bbuilder.GenerateBenthosConfigsNew(ctx, req, &workflowMetadata{WorkflowId: info.WorkflowExecution.ID, RunId: info.WorkflowExecution.RunID}, slogger)
 }

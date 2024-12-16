@@ -1,6 +1,13 @@
 'use client';
 
 import FormPersist from '@/app/(mgmt)/FormPersist';
+import {
+  clearNewJobSession,
+  fromStructToRecord,
+  getCreateNewSingleTableAiGenerateJobRequest,
+  getNewJobSessionKeys,
+  getSampleAiGeneratedRecordsRequest,
+} from '@/app/(mgmt)/[account]/jobs/util';
 import ButtonText from '@/components/ButtonText';
 import { Action } from '@/components/DualListBox/DualListBox';
 import Spinner from '@/components/Spinner';
@@ -11,7 +18,6 @@ import {
   AiSchemaTableRecord,
 } from '@/components/jobs/SchemaTable/AiSchemaTable';
 import { getSchemaConstraintHandler } from '@/components/jobs/SchemaTable/schema-constraint-handler';
-import { setOnboardingConfig } from '@/components/onboarding-checklist/OnboardingChecklist';
 import { useAccount } from '@/components/providers/account-provider';
 import { PageProps } from '@/components/types';
 import { Alert, AlertTitle } from '@/components/ui/alert';
@@ -27,38 +33,24 @@ import {
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { useToast } from '@/components/ui/use-toast';
-import { useGetAccountOnboardingConfig } from '@/libs/hooks/useGetAccountOnboardingConfig';
-import { useGetConnectionForeignConstraints } from '@/libs/hooks/useGetConnectionForeignConstraints';
-import { useGetConnectionPrimaryConstraints } from '@/libs/hooks/useGetConnectionPrimaryConstraints';
-import { useGetConnectionSchemaMap } from '@/libs/hooks/useGetConnectionSchemaMap';
-import { useGetConnectionUniqueConstraints } from '@/libs/hooks/useGetConnectionUniqueConstraints';
-import { useGetConnections } from '@/libs/hooks/useGetConnections';
-import { convertMinutesToNanoseconds, getErrorMessage } from '@/util/util';
-import { toJobDestinationOptions } from '@/yup-validations/jobs';
+import { getSingleOrUndefined } from '@/libs/utils';
+import { getErrorMessage } from '@/util/util';
+import { useMutation, useQuery } from '@connectrpc/connect-query';
 import { yupResolver } from '@hookform/resolvers/yup';
 import {
-  ActivityOptions,
-  AiGenerateSourceOptions,
-  AiGenerateSourceSchemaOption,
-  AiGenerateSourceTableOption,
-  Connection,
-  CreateJobRequest,
-  CreateJobResponse,
-  DatabaseTable,
-  GetAccountOnboardingConfigResponse,
-  GetAiGeneratedDataRequest,
-  JobDestination,
-  JobSource,
-  JobSourceOptions,
-  RetryPolicy,
-  WorkflowOptions,
-} from '@neosync/sdk';
+  createJob,
+  getAiGeneratedData,
+  getConnections,
+  getConnectionSchemaMap,
+  getConnectionTableConstraints,
+} from '@neosync/sdk/connectquery';
 import { ExclamationTriangleIcon } from '@radix-ui/react-icons';
 import { ColumnDef } from '@tanstack/react-table';
 import { useRouter } from 'next/navigation';
+import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { toast } from 'sonner';
 import { useSessionStorage } from 'usehooks-ts';
 import JobsProgressSteps, {
   getJobProgressSteps,
@@ -67,7 +59,7 @@ import {
   DefineFormValues,
   SingleTableAiConnectFormValues,
   SingleTableAiSchemaFormValues,
-} from '../../../schema';
+} from '../../../job-form-validations';
 import SampleTable from './SampleTable/SampleTable';
 import { getAiSampleTableColumns } from './SampleTable/SampleTableColumns';
 import SelectModelNames from './SelectModelNames';
@@ -76,10 +68,7 @@ import { SampleRecord } from './types';
 export default function Page({ searchParams }: PageProps): ReactElement {
   const { account } = useAccount();
   const router = useRouter();
-  const { toast } = useToast();
-  const { data: onboardingData, mutate } = useGetAccountOnboardingConfig(
-    account?.id ?? ''
-  );
+  const posthog = usePostHog();
   const [aioutput, setaioutput] = useState<SampleRecord[]>([]);
 
   useEffect(() => {
@@ -87,18 +76,26 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       router.push(`/${account?.name}/new/job`);
     }
   }, [searchParams?.sessionId]);
-  const { data: connectionsData } = useGetConnections(account?.id ?? '');
+  const { data: connectionsData } = useQuery(
+    getConnections,
+    { accountId: account?.id },
+    { enabled: !!account?.id }
+  );
   const connections = connectionsData?.connections ?? [];
 
-  const sessionPrefix = searchParams?.sessionId ?? '';
+  const { mutateAsync: createJobAsync } = useMutation(createJob);
+  const { mutateAsync: sampleRecords } = useMutation(getAiGeneratedData);
+
+  const sessionPrefix = getSingleOrUndefined(searchParams?.sessionId) ?? '';
+  const sessionKeys = getNewJobSessionKeys(sessionPrefix);
 
   // Used to complete the whole form
-  const defineFormKey = `${sessionPrefix}-new-job-define`;
+  const defineFormKey = sessionKeys.global.define;
   const [defineFormValues] = useSessionStorage<DefineFormValues>(
     defineFormKey,
     { jobName: '' }
   );
-  const connectFormKey = `${sessionPrefix}-new-job-single-table-ai-connect`;
+  const connectFormKey = sessionKeys.aigenerate.connect;
   const [connectFormValues] = useSessionStorage<SingleTableAiConnectFormValues>(
     connectFormKey,
     {
@@ -114,18 +111,19 @@ export default function Page({ searchParams }: PageProps): ReactElement {
   const {
     data: connectionSchemaDataMap,
     isLoading: isSchemaMapLoading,
-    isValidating: isSchemaMapValidating,
-  } = useGetConnectionSchemaMap(
-    account?.id ?? '',
-    connectFormValues.fkSourceConnectionId
+    isFetching: isSchemaMapValidating,
+  } = useQuery(
+    getConnectionSchemaMap,
+    { connectionId: connectFormValues.fkSourceConnectionId },
+    { enabled: !!connectFormValues.fkSourceConnectionId }
   );
 
-  const formKey = `${sessionPrefix}-new-job-single-table-ai-schema`;
-
+  const formKey = sessionKeys.aigenerate.schema;
   const [schemaFormData] = useSessionStorage<SingleTableAiSchemaFormValues>(
     formKey,
     {
       numRows: 10,
+      generateBatchSize: 10,
       model: 'gpt-3.5-turbo',
       userPrompt: '',
       schema: '',
@@ -152,45 +150,22 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       return;
     }
     try {
-      const job = await createNewJob(
-        defineFormValues,
-        connectFormValues,
-        values,
-        account.id,
-        connections
+      const connMap = new Map(connections.map((c) => [c.id, c]));
+      const job = await createJobAsync(
+        getCreateNewSingleTableAiGenerateJobRequest(
+          {
+            define: defineFormValues,
+            connect: connectFormValues,
+            schema: values,
+          },
+          account.id,
+          (id) => connMap.get(id)
+        )
       );
-      toast({
-        title: 'Successfully created job!',
-        variant: 'success',
-      });
-      window.sessionStorage.removeItem(defineFormKey);
-      window.sessionStorage.removeItem(connectFormKey);
-      window.sessionStorage.removeItem(formKey);
+      posthog.capture('New Job Created', { jobType: 'ai-generate' });
+      toast.success('Successfully created job!');
 
-      // updates the onboarding data
-      if (!onboardingData?.config?.hasCreatedJob) {
-        try {
-          const resp = await setOnboardingConfig(account.id, {
-            hasCreatedSourceConnection:
-              onboardingData?.config?.hasCreatedSourceConnection ?? true,
-            hasCreatedDestinationConnection:
-              onboardingData?.config?.hasCreatedDestinationConnection ?? true,
-            hasCreatedJob: true,
-            hasInvitedMembers:
-              onboardingData?.config?.hasInvitedMembers ?? true,
-          });
-          mutate(
-            new GetAccountOnboardingConfigResponse({
-              config: resp.config,
-            })
-          );
-        } catch (e) {
-          toast({
-            title: 'Unable to update onboarding status!',
-            variant: 'destructive',
-          });
-        }
-      }
+      clearNewJobSession(window.sessionStorage, sessionPrefix);
 
       if (job.job?.id) {
         router.push(`/${account?.name}/jobs/${job.job.id}`);
@@ -199,41 +174,29 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       }
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to create job',
+      toast.error('Unable to create job!', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
 
-  const { data: primaryConstraints, isValidating: isPkValidating } =
-    useGetConnectionPrimaryConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
-    );
-
-  const { data: foreignConstraints, isValidating: isFkValidating } =
-    useGetConnectionForeignConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
-    );
-
-  const { data: uniqueConstraints, isValidating: isUCValidating } =
-    useGetConnectionUniqueConstraints(
-      account?.id ?? '',
-      connectFormValues.fkSourceConnectionId
+  const { data: tableConstraints, isFetching: isTableConstraintsValidating } =
+    useQuery(
+      getConnectionTableConstraints,
+      { connectionId: connectFormValues.fkSourceConnectionId },
+      { enabled: !!connectFormValues.fkSourceConnectionId }
     );
 
   const schemaConstraintHandler = useMemo(
     () =>
       getSchemaConstraintHandler(
         connectionSchemaDataMap?.schemaMap ?? {},
-        primaryConstraints?.tableConstraints ?? {},
-        foreignConstraints?.tableConstraints ?? {},
-        uniqueConstraints?.tableConstraints ?? {}
+        tableConstraints?.primaryKeyConstraints ?? {},
+        tableConstraints?.foreignKeyConstraints ?? {},
+        tableConstraints?.uniqueConstraints ?? {},
+        []
       ),
-    [isSchemaMapValidating, isPkValidating, isFkValidating, isUCValidating]
+    [isSchemaMapValidating, isTableConstraintsValidating]
   );
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
 
@@ -253,17 +216,16 @@ export default function Page({ searchParams }: PageProps): ReactElement {
     }
     try {
       setIsSampling(true);
-      const output = await sample(
-        connectFormValues,
-        form.getValues(),
-        account.id
+      const output = await sampleRecords(
+        getSampleAiGeneratedRecordsRequest({
+          connect: connectFormValues,
+          schema: form.getValues(),
+        })
       );
-      setaioutput(output);
+      setaioutput(output.records.map((r) => fromStructToRecord(r)));
     } catch (err) {
-      toast({
-        title: 'Unable to generate sample data',
+      toast.error('Unable to generate sample data', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     } finally {
       setIsSampling(false);
@@ -298,9 +260,11 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       const tableSchema =
         connectionSchemaDataMap.schemaMap[`${formSchema}.${formTable}`];
       if (tableSchema) {
-        tdata.push(...tableSchema);
+        tdata.push(...tableSchema.schemas);
         cols.push(
-          ...getAiSampleTableColumns(tableSchema.map((dbcol) => dbcol.column))
+          ...getAiSampleTableColumns(
+            tableSchema.schemas.map((dbcol) => dbcol.column)
+          )
         );
       }
     }
@@ -414,6 +378,34 @@ export default function Page({ searchParams }: PageProps): ReactElement {
             )}
           />
 
+          <FormField
+            control={form.control}
+            name="generateBatchSize"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Batch Size</FormLabel>
+                <FormDescription>
+                  The batch size used when asking the model to generate records.
+                  Useful for large datasets or prompts that may exceed AI token
+                  limits. Smaller is generally better.
+                </FormDescription>
+                <FormControl>
+                  <Input
+                    {...field}
+                    type="number"
+                    onChange={(e) => {
+                      const numberValue = e.target.valueAsNumber;
+                      if (!isNaN(numberValue)) {
+                        field.onChange(numberValue);
+                      }
+                    }}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           {form.formState.errors.root && (
             <Alert variant="destructive">
               <AlertTitle className="flex flex-row space-x-2 justify-center">
@@ -444,131 +436,4 @@ export default function Page({ searchParams }: PageProps): ReactElement {
       </Form>
     </div>
   );
-}
-
-async function sample(
-  connect: SingleTableAiConnectFormValues,
-  schemaform: SingleTableAiSchemaFormValues,
-  accountId: string
-): Promise<SampleRecord[]> {
-  const body = new GetAiGeneratedDataRequest({
-    aiConnectionId: connect.sourceId,
-    count: BigInt(10),
-    modelName: schemaform.model,
-    userPrompt: schemaform.userPrompt,
-    dataConnectionId: connect.fkSourceConnectionId,
-    table: new DatabaseTable({
-      schema: schemaform.schema,
-      table: schemaform.table,
-    }),
-  });
-
-  const res = await fetch(
-    `/api/accounts/${accountId}/connections/${connect.sourceId}/generate`,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return (await res.json())?.records ?? [];
-}
-
-async function createNewJob(
-  define: DefineFormValues,
-  connect: SingleTableAiConnectFormValues,
-  schemaForm: SingleTableAiSchemaFormValues,
-  accountId: string,
-  connections: Connection[]
-): Promise<CreateJobResponse> {
-  const connectionIdMap = new Map(
-    connections.map((connection) => [connection.id, connection])
-  );
-  let workflowOptions: WorkflowOptions | undefined = undefined;
-  if (define.workflowSettings?.runTimeout) {
-    workflowOptions = new WorkflowOptions({
-      runTimeout: convertMinutesToNanoseconds(
-        define.workflowSettings.runTimeout
-      ),
-    });
-  }
-  let syncOptions: ActivityOptions | undefined = undefined;
-  if (define.syncActivityOptions) {
-    const formSyncOpts = define.syncActivityOptions;
-    syncOptions = new ActivityOptions({
-      scheduleToCloseTimeout:
-        formSyncOpts.scheduleToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.scheduleToCloseTimeout)
-          : undefined,
-      startToCloseTimeout:
-        formSyncOpts.startToCloseTimeout !== undefined
-          ? convertMinutesToNanoseconds(formSyncOpts.startToCloseTimeout)
-          : undefined,
-      retryPolicy: new RetryPolicy({
-        maximumAttempts: formSyncOpts.retryPolicy?.maximumAttempts,
-      }),
-    });
-  }
-
-  const body = new CreateJobRequest({
-    accountId,
-    jobName: define.jobName,
-    cronSchedule: define.cronSchedule,
-    initiateJobRun: define.initiateJobRun,
-    mappings: [],
-    source: new JobSource({
-      options: new JobSourceOptions({
-        config: {
-          case: 'aiGenerate',
-          value: new AiGenerateSourceOptions({
-            aiConnectionId: connect.sourceId,
-            modelName: schemaForm.model,
-            fkSourceConnectionId: connect.fkSourceConnectionId,
-            userPrompt: schemaForm.userPrompt,
-            schemas: [
-              new AiGenerateSourceSchemaOption({
-                schema: schemaForm.schema,
-                tables: [
-                  new AiGenerateSourceTableOption({
-                    table: schemaForm.table,
-                    rowCount: BigInt(schemaForm.numRows),
-                  }),
-                ],
-              }),
-            ],
-          }),
-        },
-      }),
-    }),
-    destinations: [
-      new JobDestination({
-        connectionId: connect.destination.connectionId,
-        options: toJobDestinationOptions(
-          connect.destination,
-          connectionIdMap.get(connect.destination.connectionId)
-        ),
-      }),
-    ],
-    workflowOptions: workflowOptions,
-    syncOptions: syncOptions,
-  });
-
-  const res = await fetch(`/api/accounts/${accountId}/jobs`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  return CreateJobResponse.fromJson(await res.json());
 }

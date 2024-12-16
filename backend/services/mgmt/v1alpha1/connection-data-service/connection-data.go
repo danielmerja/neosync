@@ -1,13 +1,14 @@
 package v1alpha1_connectiondataservice
 
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,14 +16,23 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/ai/azopenai"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	dynamotypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/gofrs/uuid"
-	pg_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/postgresql"
 	mgmtv1alpha1 "github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1"
 	logger_interceptor "github.com/nucleuscloud/neosync/backend/internal/connect/interceptors/logger"
 	nucleuserrors "github.com/nucleuscloud/neosync/backend/internal/errors"
-	"github.com/nucleuscloud/neosync/backend/internal/nucleusdb"
-	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	neosync_gcp "github.com/nucleuscloud/neosync/backend/internal/gcp"
+	"github.com/nucleuscloud/neosync/backend/internal/neosyncdb"
+	"github.com/nucleuscloud/neosync/backend/pkg/sqlconnect"
+	sqlmanager_mysql "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/mysql"
+	sqlmanager_postgres "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/postgres"
+	sqlmanager_shared "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager/shared"
+	connectionmanager "github.com/nucleuscloud/neosync/internal/connection-manager"
+	neosync_dynamodb "github.com/nucleuscloud/neosync/internal/dynamodb"
+	querybuilder "github.com/nucleuscloud/neosync/worker/pkg/query-builder"
+	"go.mongodb.org/mongo-driver/bson"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -79,7 +89,7 @@ func (s *Service) GetConnectionDataStream(
 			return err
 		}
 
-		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.ConnectionConfig, &connectionTimeout, logger)
+		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.ConnectionConfig, logger, sqlconnect.WithConnectionTimeout(connectionTimeout), sqlconnect.WithMysqlParseTimeDisabled())
 		if err != nil {
 			return err
 		}
@@ -89,10 +99,14 @@ func (s *Service) GetConnectionDataStream(
 			return err
 		}
 
+		table := sqlmanager_shared.BuildTable(req.Msg.Schema, req.Msg.Table)
 		// used to get column names
-		query := fmt.Sprintf("SELECT * FROM %s LIMIT 1;", sql_manager.BuildTable(req.Msg.Schema, req.Msg.Table))
+		query, err := querybuilder.BuildSelectLimitQuery("mysql", table, 1)
+		if err != nil {
+			return err
+		}
 		r, err := db.QueryContext(ctx, query)
-		if err != nil && !nucleusdb.IsNoRows(err) {
+		if err != nil && !neosyncdb.IsNoRows(err) {
 			return err
 		}
 
@@ -101,9 +115,12 @@ func (s *Service) GetConnectionDataStream(
 			return err
 		}
 
-		selectQuery := fmt.Sprintf("SELECT %s FROM %s;", strings.Join(columnNames, ", "), sql_manager.BuildTable(req.Msg.Schema, req.Msg.Table))
+		selectQuery, err := querybuilder.BuildSelectQuery("mysql", table, columnNames, nil)
+		if err != nil {
+			return err
+		}
 		rows, err := db.QueryContext(ctx, selectQuery)
-		if err != nil && !nucleusdb.IsNoRows(err) {
+		if err != nil && !neosyncdb.IsNoRows(err) {
 			return err
 		}
 
@@ -133,74 +150,57 @@ func (s *Service) GetConnectionDataStream(
 			return err
 		}
 
-		conn, err := s.sqlConnector.NewPgPoolFromConnectionConfig(config.PgConfig, &connectionTimeout, logger)
+		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.GetConnectionConfig(), logger, sqlconnect.WithConnectionTimeout(connectionTimeout))
 		if err != nil {
 			return err
 		}
-		db, err := conn.Open(ctx)
+		db, err := conn.Open()
 		if err != nil {
 			return err
 		}
 		defer conn.Close()
 
+		table := sqlmanager_shared.BuildTable(req.Msg.Schema, req.Msg.Table)
 		// used to get column names
-		query := fmt.Sprintf("SELECT * FROM %s LIMIT 1;", sql_manager.BuildTable(req.Msg.Schema, req.Msg.Table))
-		r, err := db.Query(ctx, query)
-		if err != nil && !nucleusdb.IsNoRows(err) {
+		query, err := querybuilder.BuildSelectLimitQuery(sqlmanager_shared.GoquPostgresDriver, table, 1)
+		if err != nil {
+			return err
+		}
+		r, err := db.QueryContext(ctx, query)
+		if err != nil && !neosyncdb.IsNoRows(err) {
 			return err
 		}
 		defer r.Close()
 
-		columnNames := []string{}
-		for _, col := range r.FieldDescriptions() {
-			columnNames = append(columnNames, col.Name)
+		columnNames, err := r.Columns()
+		if err != nil {
+			return err
 		}
 
-		selectQuery := fmt.Sprintf("SELECT %s FROM %s;", strings.Join(columnNames, ", "), sql_manager.BuildTable(req.Msg.Schema, req.Msg.Table))
-		rows, err := db.Query(ctx, selectQuery)
-		if err != nil && !nucleusdb.IsNoRows(err) {
+		selectQuery, err := querybuilder.BuildSelectQuery(sqlmanager_shared.GoquPostgresDriver, table, columnNames, nil)
+		if err != nil {
+			return err
+		}
+		rows, err := db.QueryContext(ctx, selectQuery)
+		if err != nil && !neosyncdb.IsNoRows(err) {
 			return err
 		}
 		defer rows.Close()
 
+		// todo: this is probably way fucking broken now
 		for rows.Next() {
 			values := make([][]byte, len(columnNames))
 			valuesWrapped := make([]any, 0, len(columnNames))
-
-			for i, col := range r.FieldDescriptions() {
-				if col.DataTypeOID == 1082 { // OID for date
-					var t time.Time
-					ds := DateScanner{val: &t}
-					valuesWrapped = append(valuesWrapped, &ds)
-				} else {
-					valuesWrapped = append(valuesWrapped, &values[i])
-				}
+			for i := range values {
+				valuesWrapped = append(valuesWrapped, &values[i])
 			}
-
 			if err := rows.Scan(valuesWrapped...); err != nil {
 				return err
 			}
 			row := map[string][]byte{}
 			for i, v := range values {
 				col := columnNames[i]
-				if r.FieldDescriptions()[i].DataTypeOID == 1082 { // OID for date
-					// Convert time.Time value to []byte
-					if ds, ok := valuesWrapped[i].(*DateScanner); ok && ds.val != nil {
-						row[col] = []byte(ds.val.Format(time.RFC3339))
-					} else {
-						row[col] = v
-					}
-				} else if r.FieldDescriptions()[i].DataTypeOID == 2950 { // OID for UUID
-					// Convert the byte slice to a uuid.UUID type
-					uuidValue, err := uuid.FromBytes(v)
-					if err == nil {
-						row[col] = []byte(uuidValue.String())
-					} else {
-						row[col] = v
-					}
-				} else {
-					row[col] = v
-				}
+				row[col] = v
 			}
 
 			if err := stream.Send(&mgmtv1alpha1.GetConnectionDataStreamResponse{Row: row}); err != nil {
@@ -218,27 +218,43 @@ func (s *Service) GetConnectionDataStream(
 		awsS3Config := config.AwsS3Config
 		s3Client, err := s.awsManager.NewS3Client(ctx, awsS3Config)
 		if err != nil {
-			logger.Error("unable to create AWS S3 client")
-			return err
+			return fmt.Errorf("unable to create AWS S3 client: %w", err)
 		}
-		logger.Info("created AWS S3 client")
+		logger.Debug("created AWS S3 client")
+
+		connAwsConfig := connection.ConnectionConfig.GetAwsS3Config()
+		s3pathpieces := []string{}
+		if connAwsConfig != nil && connAwsConfig.GetPathPrefix() != "" {
+			s3pathpieces = append(s3pathpieces, strings.Trim(connAwsConfig.GetPathPrefix(), "/"))
+		}
 
 		var jobRunId string
 		switch id := awsS3StreamCfg.Id.(type) {
 		case *mgmtv1alpha1.AwsS3StreamConfig_JobRunId:
 			jobRunId = id.JobRunId
 		case *mgmtv1alpha1.AwsS3StreamConfig_JobId:
-			runId, err := s.getLastestJobRunFromAwsS3(ctx, logger, s3Client, id.JobId, awsS3Config.Bucket, awsS3Config.Region)
+			logger = logger.With("jobId", id.JobId)
+			runId, err := s.getLastestJobRunFromAwsS3(ctx, logger, s3Client, id.JobId, awsS3Config.Bucket, awsS3Config.Region, s3pathpieces)
 			if err != nil {
 				return err
 			}
+			logger.Debug(fmt.Sprintf("found run id for job in s3: %s", runId))
 			jobRunId = runId
 		default:
 			return nucleuserrors.NewInternalError("unsupported AWS S3 config id")
 		}
+		logger = logger.With("runId", jobRunId)
 
-		tableName := sql_manager.BuildTable(req.Msg.Schema, req.Msg.Table)
-		path := fmt.Sprintf("workflows/%s/activities/%s/data", jobRunId, tableName)
+		tableName := sqlmanager_shared.BuildTable(req.Msg.Schema, req.Msg.Table)
+		s3pathpieces = append(
+			s3pathpieces,
+			"workflows",
+			jobRunId,
+			"activities",
+			tableName,
+			"data",
+		)
+		path := strings.Join(s3pathpieces, "/")
 		var pageToken *string
 		for {
 			output, err := s.awsManager.ListObjectsV2(ctx, s3Client, awsS3Config.Region, &s3.ListObjectsV2Input{
@@ -250,7 +266,7 @@ func (s *Service) GetConnectionDataStream(
 				return err
 			}
 			if output == nil {
-				logger.Info(fmt.Sprintf("0 files found for path: %s", path))
+				logger.Debug(fmt.Sprintf("0 files found for path: %s", path))
 				break
 			}
 			for _, item := range output.Contents {
@@ -268,27 +284,30 @@ func (s *Service) GetConnectionDataStream(
 					return fmt.Errorf("error creating gzip reader: %w", err)
 				}
 
-				scanner := bufio.NewScanner(gzr)
-				for scanner.Scan() {
-					line := scanner.Bytes()
+				decoder := json.NewDecoder(gzr)
+				for {
 					var data map[string]any
-					err = json.Unmarshal(line, &data)
-					if err != nil {
+
+					// Decode the next JSON object
+					err = decoder.Decode(&data)
+					if err != nil && err == io.EOF {
+						break // End of file, stop the loop
+					} else if err != nil {
 						result.Body.Close()
 						gzr.Close()
 						return err
 					}
-
 					rowMap := make(map[string][]byte)
 					for key, value := range data {
 						var byteValue []byte
-						if str, ok := value.(string); ok {
+						switch v := value.(type) {
+						case string:
 							// try converting string directly to []byte
 							// prevents quoted strings
-							byteValue = []byte(str)
-						} else {
+							byteValue = []byte(v)
+						default:
 							// if not a string use JSON encoding
-							byteValue, err = json.Marshal(value)
+							byteValue, err = json.Marshal(v)
 							if err != nil {
 								result.Body.Close()
 								gzr.Close()
@@ -306,11 +325,6 @@ func (s *Service) GetConnectionDataStream(
 						return err
 					}
 				}
-				if err := scanner.Err(); err != nil {
-					result.Body.Close()
-					gzr.Close()
-					return err
-				}
 				result.Body.Close()
 				gzr.Close()
 			}
@@ -321,11 +335,139 @@ func (s *Service) GetConnectionDataStream(
 			break
 		}
 
+	case *mgmtv1alpha1.ConnectionConfig_GcpCloudstorageConfig:
+		gcpStreamCfg := req.Msg.GetStreamConfig().GetGcpCloudstorageConfig()
+		if gcpStreamCfg == nil {
+			return nucleuserrors.NewBadRequest("must provide non-nil gcp cloud storage config in request")
+		}
+		gcpclient, err := s.gcpmanager.GetClient(ctx, logger)
+		if err != nil {
+			return fmt.Errorf("unable to init gcp storage client: %w", err)
+		}
+		gcpConfig := config.GcpCloudstorageConfig
+
+		var jobRunId string
+		switch id := gcpStreamCfg.Id.(type) {
+		case *mgmtv1alpha1.GcpCloudStorageStreamConfig_JobRunId:
+			jobRunId = id.JobRunId
+		case *mgmtv1alpha1.GcpCloudStorageStreamConfig_JobId:
+			runId, err := s.getLatestJobRunFromGcs(ctx, gcpclient, id.JobId, gcpConfig.GetBucket(), gcpConfig.PathPrefix)
+			if err != nil {
+				return err
+			}
+			jobRunId = runId
+		default:
+			return nucleuserrors.NewNotImplemented(fmt.Sprintf("unsupported GCP Cloud Storage config id: %T", id))
+		}
+
+		onRecord := func(record map[string][]byte) error {
+			return stream.Send(&mgmtv1alpha1.GetConnectionDataStreamResponse{Row: record})
+		}
+		tablePath := neosync_gcp.GetWorkflowActivityDataPrefix(jobRunId, sqlmanager_shared.BuildTable(req.Msg.Schema, req.Msg.Table), gcpConfig.PathPrefix)
+		err = gcpclient.GetRecordStreamFromPrefix(ctx, gcpConfig.GetBucket(), tablePath, onRecord)
+		if err != nil {
+			return fmt.Errorf("unable to finish sending record stream: %w", err)
+		}
+	case *mgmtv1alpha1.ConnectionConfig_DynamodbConfig:
+		dynamoclient, err := s.awsManager.NewDynamoDbClient(ctx, config.DynamodbConfig)
+		if err != nil {
+			return fmt.Errorf("unable to create dynamodb client from connection: %w", err)
+		}
+		var lastEvaluatedKey map[string]dynamotypes.AttributeValue
+
+		for {
+			output, err := dynamoclient.ScanTable(ctx, req.Msg.Table, lastEvaluatedKey)
+			if err != nil {
+				return fmt.Errorf("failed to scan table %s: %w", req.Msg.Table, err)
+			}
+
+			for _, item := range output.Items {
+				row := make(map[string][]byte)
+
+				itemBits, err := neosync_dynamodb.ConvertMapToJSONBytes(item)
+				if err != nil {
+					return err
+				}
+				row["item"] = itemBits
+				if err := stream.Send(&mgmtv1alpha1.GetConnectionDataStreamResponse{Row: row}); err != nil {
+					return fmt.Errorf("failed to send stream response: %w", err)
+				}
+			}
+
+			lastEvaluatedKey = output.LastEvaluatedKey
+			if lastEvaluatedKey == nil {
+				break
+			}
+		}
+
 	default:
-		return nucleuserrors.NewNotImplemented("this connection config is not currently supported")
+		return nucleuserrors.NewNotImplemented(fmt.Sprintf("this connection config is not currently supported: %T", config))
+	}
+	return nil
+}
+
+func (s *Service) GetConnectionSchemaMaps(
+	ctx context.Context,
+	req *connect.Request[mgmtv1alpha1.GetConnectionSchemaMapsRequest],
+) (*connect.Response[mgmtv1alpha1.GetConnectionSchemaMapsResponse], error) {
+	errgrp, errctx := errgroup.WithContext(ctx)
+	errgrp.SetLimit(3)
+
+	responses := make([]*mgmtv1alpha1.GetConnectionSchemaMapResponse, len(req.Msg.GetRequests()))
+	connectionIds := make([]string, len(req.Msg.GetRequests()))
+
+	for idx, mapReq := range req.Msg.GetRequests() {
+		idx := idx
+		mapReq := mapReq
+		connectionIds[idx] = mapReq.GetConnectionId()
+
+		errgrp.Go(func() error {
+			resp, err := s.GetConnectionSchemaMap(errctx, connect.NewRequest(mapReq))
+			if err != nil {
+				return err
+			}
+			responses[idx] = &mgmtv1alpha1.GetConnectionSchemaMapResponse{
+				SchemaMap: resp.Msg.GetSchemaMap(),
+			}
+			return nil
+		})
 	}
 
-	return nil
+	err := errgrp.Wait()
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaMapsResponse{
+		Responses:     responses,
+		ConnectionIds: connectionIds,
+	}), nil
+}
+
+func (s *Service) GetConnectionSchemaMap(
+	ctx context.Context,
+	req *connect.Request[mgmtv1alpha1.GetConnectionSchemaMapRequest],
+) (*connect.Response[mgmtv1alpha1.GetConnectionSchemaMapResponse], error) {
+	schemaResp, err := s.GetConnectionSchema(ctx, connect.NewRequest(&mgmtv1alpha1.GetConnectionSchemaRequest{
+		ConnectionId: req.Msg.GetConnectionId(),
+		SchemaConfig: req.Msg.GetSchemaConfig(),
+	}))
+	if err != nil {
+		return nil, err
+	}
+	outputMap := map[string]*mgmtv1alpha1.GetConnectionSchemaResponse{}
+	for _, dbcol := range schemaResp.Msg.GetSchemas() {
+		schematableKey := sqlmanager_shared.SchemaTable{Schema: dbcol.Schema, Table: dbcol.Table}.String()
+		resp, ok := outputMap[schematableKey]
+		if !ok {
+			resp = &mgmtv1alpha1.GetConnectionSchemaResponse{}
+		}
+		resp.Schemas = append(resp.Schemas, dbcol)
+		outputMap[schematableKey] = resp
+	}
+	return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaMapResponse{
+		SchemaMap: outputMap,
+	}), nil
 }
 
 func (s *Service) GetConnectionSchema(
@@ -347,34 +489,34 @@ func (s *Service) GetConnectionSchema(
 	}
 
 	switch config := connection.ConnectionConfig.Config.(type) {
-	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig, *mgmtv1alpha1.ConnectionConfig_PgConfig:
-		connectionTimeout := 5
-		db, err := s.sqlmanager.NewSqlDb(ctx, logger, connection, &connectionTimeout)
+	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig, *mgmtv1alpha1.ConnectionConfig_PgConfig, *mgmtv1alpha1.ConnectionConfig_MssqlConfig:
+		db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection, logger)
 		if err != nil {
 			return nil, err
 		}
-		defer db.Db.Close()
+		defer db.Db().Close()
 
-		dbschema, err := db.Db.GetDatabaseSchema(ctx)
+		dbschema, err := db.Db().GetDatabaseSchema(ctx)
 		if err != nil {
 			return nil, err
 		}
-
 		schemas := []*mgmtv1alpha1.DatabaseColumn{}
 		for _, col := range dbschema {
+			col := col
 			var defaultColumn *string
 			if col.ColumnDefault != "" {
 				defaultColumn = &col.ColumnDefault
 			}
 
 			schemas = append(schemas, &mgmtv1alpha1.DatabaseColumn{
-				Schema:        col.TableSchema,
-				Table:         col.TableName,
-				Column:        col.ColumnName,
-				DataType:      col.DataType,
-				IsNullable:    col.IsNullable,
-				ColumnDefault: defaultColumn,
-				GeneratedType: col.GeneratedType,
+				Schema:             col.TableSchema,
+				Table:              col.TableName,
+				Column:             col.ColumnName,
+				DataType:           col.DataType,
+				IsNullable:         col.NullableString(),
+				ColumnDefault:      defaultColumn,
+				GeneratedType:      col.GeneratedType,
+				IdentityGeneration: col.IdentityGeneration,
 			})
 		}
 
@@ -382,6 +524,36 @@ func (s *Service) GetConnectionSchema(
 			Schemas: schemas,
 		}), nil
 
+	case *mgmtv1alpha1.ConnectionConfig_MongoConfig:
+		db, err := s.mongoconnector.NewFromConnectionConfig(connection.GetConnectionConfig(), logger)
+		if err != nil {
+			return nil, err
+		}
+		mongoclient, err := db.Open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Close(ctx)
+		dbnames, err := mongoclient.ListDatabaseNames(ctx, bson.D{})
+		if err != nil {
+			return nil, err
+		}
+		schemas := []*mgmtv1alpha1.DatabaseColumn{}
+		for _, dbname := range dbnames {
+			collectionNames, err := mongoclient.Database(dbname).ListCollectionNames(ctx, bson.D{})
+			if err != nil {
+				return nil, err
+			}
+			for _, collectionName := range collectionNames {
+				schemas = append(schemas, &mgmtv1alpha1.DatabaseColumn{
+					Schema: dbname,
+					Table:  collectionName,
+				})
+			}
+		}
+		return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaResponse{
+			Schemas: schemas,
+		}), nil
 	case *mgmtv1alpha1.ConnectionConfig_AwsS3Config:
 		awsCfg := req.Msg.SchemaConfig.GetAwsS3Config()
 		if awsCfg == nil {
@@ -389,18 +561,24 @@ func (s *Service) GetConnectionSchema(
 		}
 
 		awsS3Config := config.AwsS3Config
-		s3Client, err := s.awsManager.NewS3Client(ctx, config.AwsS3Config)
+		s3Client, err := s.awsManager.NewS3Client(ctx, awsS3Config)
 		if err != nil {
 			return nil, err
 		}
-		logger.Info("created S3 AWS session")
+		logger.Debug("created S3 AWS session")
+
+		connAwsConfig := connection.ConnectionConfig.GetAwsS3Config()
+		s3pathpieces := []string{}
+		if connAwsConfig != nil && connAwsConfig.GetPathPrefix() != "" {
+			s3pathpieces = append(s3pathpieces, strings.Trim(connAwsConfig.GetPathPrefix(), "/"))
+		}
 
 		var jobRunId string
 		switch id := awsCfg.Id.(type) {
 		case *mgmtv1alpha1.AwsS3SchemaConfig_JobRunId:
 			jobRunId = id.JobRunId
 		case *mgmtv1alpha1.AwsS3SchemaConfig_JobId:
-			runId, err := s.getLastestJobRunFromAwsS3(ctx, logger, s3Client, id.JobId, awsS3Config.Bucket, awsS3Config.Region)
+			runId, err := s.getLastestJobRunFromAwsS3(ctx, logger, s3Client, id.JobId, awsS3Config.Bucket, awsS3Config.Region, s3pathpieces)
 			if err != nil {
 				return nil, err
 			}
@@ -409,7 +587,13 @@ func (s *Service) GetConnectionSchema(
 			return nil, nucleuserrors.NewInternalError("unsupported AWS S3 config id")
 		}
 
-		path := fmt.Sprintf("workflows/%s/activities/", jobRunId)
+		s3pathpieces = append(
+			s3pathpieces,
+			"workflows",
+			jobRunId,
+			"activities/",
+		)
+		path := strings.Join(s3pathpieces, "/")
 
 		schemas := []*mgmtv1alpha1.DatabaseColumn{}
 		var pageToken *string
@@ -431,7 +615,7 @@ func (s *Service) GetConnectionSchema(
 				tableFolder := strings.ReplaceAll(folders[len(folders)-1], "/", "")
 				schemaTableList := strings.Split(tableFolder, ".")
 
-				filePath := fmt.Sprintf("%s%s/data", path, sql_manager.BuildTable(schemaTableList[0], schemaTableList[1]))
+				filePath := fmt.Sprintf("%s%s/data", path, sqlmanager_shared.BuildTable(schemaTableList[0], schemaTableList[1]))
 				out, err := s.awsManager.ListObjectsV2(ctx, s3Client, awsS3Config.Region, &s3.ListObjectsV2Input{
 					Bucket:  aws.String(awsS3Config.Bucket),
 					Prefix:  aws.String(filePath),
@@ -441,7 +625,8 @@ func (s *Service) GetConnectionSchema(
 					return nil, err
 				}
 				if out == nil {
-					break
+					logger.Warn(fmt.Sprintf("AWS S3 table folder missing data folder: %s, continuing..", tableFolder))
+					continue
 				}
 				item := out.Contents[0]
 				result, err := s.awsManager.GetObject(ctx, s3Client, awsS3Config.Region, &s3.GetObjectInput{
@@ -451,6 +636,10 @@ func (s *Service) GetConnectionSchema(
 				if err != nil {
 					return nil, err
 				}
+				if result.ContentLength == nil || *result.ContentLength == 0 {
+					logger.Warn(fmt.Sprintf("empty AWS S3 data folder for table: %s, continuing...", tableFolder))
+					continue
+				}
 
 				gzr, err := gzip.NewReader(result.Body)
 				if err != nil {
@@ -458,12 +647,14 @@ func (s *Service) GetConnectionSchema(
 					return nil, fmt.Errorf("error creating gzip reader: %w", err)
 				}
 
-				scanner := bufio.NewScanner(gzr)
-				if scanner.Scan() {
-					line := scanner.Bytes()
+				decoder := json.NewDecoder(gzr)
+				for {
 					var data map[string]any
-					err = json.Unmarshal(line, &data)
-					if err != nil {
+					// Decode the next JSON object
+					err = decoder.Decode(&data)
+					if err != nil && err == io.EOF {
+						break // End of file, stop the loop
+					} else if err != nil {
 						result.Body.Close()
 						gzr.Close()
 						return nil, err
@@ -476,11 +667,7 @@ func (s *Service) GetConnectionSchema(
 							Column: key,
 						})
 					}
-				}
-				if err := scanner.Err(); err != nil {
-					result.Body.Close()
-					gzr.Close()
-					return nil, err
+					break // Only care about first record
 				}
 				result.Body.Close()
 				gzr.Close()
@@ -494,9 +681,63 @@ func (s *Service) GetConnectionSchema(
 		return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaResponse{
 			Schemas: schemas,
 		}), nil
+	case *mgmtv1alpha1.ConnectionConfig_GcpCloudstorageConfig:
+		gcpCfg := req.Msg.GetSchemaConfig().GetGcpCloudstorageConfig()
+		if gcpCfg == nil {
+			return nil, nucleuserrors.NewBadRequest("must provide gcp cloud storage config")
+		}
 
+		gcpclient, err := s.gcpmanager.GetClient(ctx, logger)
+		if err != nil {
+			return nil, fmt.Errorf("unable to init gcp storage client: %w", err)
+		}
+		gcpConfig := config.GcpCloudstorageConfig
+
+		var jobRunId string
+		switch id := gcpCfg.Id.(type) {
+		case *mgmtv1alpha1.GcpCloudStorageSchemaConfig_JobRunId:
+			jobRunId = id.JobRunId
+		case *mgmtv1alpha1.GcpCloudStorageSchemaConfig_JobId:
+			runId, err := s.getLatestJobRunFromGcs(ctx, gcpclient, id.JobId, gcpConfig.GetBucket(), gcpConfig.PathPrefix)
+			if err != nil {
+				return nil, err
+			}
+			jobRunId = runId
+		default:
+			return nil, nucleuserrors.NewNotImplemented(fmt.Sprintf("unsupported GCP Cloud Storage config id: %T", id))
+		}
+
+		schemas, err := gcpclient.GetDbSchemaFromPrefix(
+			ctx,
+			gcpConfig.GetBucket(), neosync_gcp.GetWorkflowActivityPrefix(jobRunId, gcpConfig.PathPrefix),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("uanble to retrieve db schema from gcs: %w", err)
+		}
+		return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaResponse{
+			Schemas: schemas,
+		}), nil
+	case *mgmtv1alpha1.ConnectionConfig_DynamodbConfig:
+		dynclient, err := s.awsManager.NewDynamoDbClient(ctx, config.DynamodbConfig)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create dynamodb client from connection: %w", err)
+		}
+		tableNames, err := dynclient.ListAllTables(ctx, &dynamodb.ListTablesInput{})
+		if err != nil {
+			return nil, fmt.Errorf("unable to retrieve dynamodb tables: %w", err)
+		}
+		schemas := []*mgmtv1alpha1.DatabaseColumn{}
+		for _, tableName := range tableNames {
+			schemas = append(schemas, &mgmtv1alpha1.DatabaseColumn{
+				Schema: "dynamodb",
+				Table:  tableName,
+			})
+		}
+		return connect.NewResponse(&mgmtv1alpha1.GetConnectionSchemaResponse{
+			Schemas: schemas,
+		}), nil
 	default:
-		return nil, nucleuserrors.NewNotImplemented("this connection config is not currently supported")
+		return nil, nucleuserrors.NewNotImplemented(fmt.Sprintf("this connection config is not currently supported: %T", config))
 	}
 }
 
@@ -531,19 +772,18 @@ func (s *Service) GetConnectionForeignConstraints(
 		schemas = append(schemas, s)
 	}
 
-	connectionTimeout := 5
-	db, err := s.sqlmanager.NewSqlDb(ctx, logger, connection.Msg.GetConnection(), &connectionTimeout)
+	db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Db.Close()
-	foreignKeyMap, err := db.Db.GetForeignKeyConstraintsMap(ctx, schemas)
+	defer db.Db().Close()
+	constraints, err := db.Db().GetTableConstraintsBySchema(ctx, schemas)
 	if err != nil {
 		return nil, err
 	}
 
 	tableConstraints := map[string]*mgmtv1alpha1.ForeignConstraintTables{}
-	for tableName, d := range foreignKeyMap {
+	for tableName, d := range constraints.ForeignKeyConstraints {
 		tableConstraints[tableName] = &mgmtv1alpha1.ForeignConstraintTables{
 			Constraints: []*mgmtv1alpha1.ForeignConstraint{},
 		}
@@ -595,20 +835,19 @@ func (s *Service) GetConnectionPrimaryConstraints(
 		schemas = append(schemas, s)
 	}
 
-	connectionTimeout := 5
-	db, err := s.sqlmanager.NewSqlDb(ctx, logger, connection.Msg.GetConnection(), &connectionTimeout)
+	db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Db.Close()
+	defer db.Db().Close()
 
-	primaryKeysMap, err := db.Db.GetPrimaryKeyConstraintsMap(ctx, schemas)
+	constraints, err := db.Db().GetTableConstraintsBySchema(ctx, schemas)
 	if err != nil {
 		return nil, err
 	}
 
 	tableConstraints := map[string]*mgmtv1alpha1.PrimaryConstraint{}
-	for tableName, cols := range primaryKeysMap {
+	for tableName, cols := range constraints.PrimaryKeyConstraints {
 		tableConstraints[tableName] = &mgmtv1alpha1.PrimaryConstraint{
 			Columns: cols,
 		}
@@ -643,25 +882,37 @@ func (s *Service) GetConnectionInitStatements(
 
 	schemaTableMap := map[string]*mgmtv1alpha1.DatabaseColumn{}
 	for _, s := range schemaResp {
-		schemaTableMap[sql_manager.BuildTable(s.Schema, s.Table)] = s
+		schemaTableMap[sqlmanager_shared.BuildTable(s.Schema, s.Table)] = s
 	}
 
-	connectionTimeout := 5
-	db, err := s.sqlmanager.NewSqlDb(ctx, logger, connection.Msg.GetConnection(), &connectionTimeout)
+	db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Db.Close()
+	defer db.Db().Close()
 
 	createStmtsMap := map[string]string{}
 	truncateStmtsMap := map[string]string{}
+	initSchemaStmts := []*mgmtv1alpha1.SchemaInitStatements{}
 	if req.Msg.GetOptions().GetInitSchema() {
+		tables := []*sqlmanager_shared.SchemaTable{}
 		for k, v := range schemaTableMap {
-			stmt, err := db.Db.GetCreateTableStatement(ctx, v.Schema, v.Table)
+			stmt, err := db.Db().GetCreateTableStatement(ctx, v.Schema, v.Table)
 			if err != nil {
 				return nil, err
 			}
 			createStmtsMap[k] = stmt
+			tables = append(tables, &sqlmanager_shared.SchemaTable{Schema: v.Schema, Table: v.Table})
+		}
+		initBlocks, err := db.Db().GetSchemaInitStatements(ctx, tables)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range initBlocks {
+			initSchemaStmts = append(initSchemaStmts, &mgmtv1alpha1.SchemaInitStatements{
+				Label:      b.Label,
+				Statements: b.Statements,
+			})
 		}
 	}
 
@@ -669,7 +920,7 @@ func (s *Service) GetConnectionInitStatements(
 	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig:
 		if req.Msg.GetOptions().GetTruncateBeforeInsert() {
 			for k, v := range schemaTableMap {
-				stmt, err := sql_manager.BuildMysqlTruncateStatement(v.Schema, v.Table)
+				stmt, err := sqlmanager_mysql.BuildMysqlTruncateStatement(v.Schema, v.Table)
 				if err != nil {
 					return nil, err
 				}
@@ -680,7 +931,7 @@ func (s *Service) GetConnectionInitStatements(
 	case *mgmtv1alpha1.ConnectionConfig_PgConfig:
 		if req.Msg.GetOptions().GetTruncateCascade() {
 			for k, v := range schemaTableMap {
-				stmt, err := sql_manager.BuildPgTruncateCascadeStatement(v.Schema, v.Table)
+				stmt, err := sqlmanager_postgres.BuildPgTruncateCascadeStatement(v.Schema, v.Table)
 				if err != nil {
 					return nil, err
 				}
@@ -697,6 +948,7 @@ func (s *Service) GetConnectionInitStatements(
 	return connect.NewResponse(&mgmtv1alpha1.GetConnectionInitStatementsResponse{
 		TableInitStatements:     createStmtsMap,
 		TableTruncateStatements: truncateStmtsMap,
+		SchemaInitStatements:    initSchemaStmts,
 	}), nil
 }
 
@@ -734,7 +986,34 @@ func (s *Service) getConnectionSchema(ctx context.Context, connection *mgmtv1alp
 				AwsS3Config: cfg,
 			},
 		}
-
+	case *mgmtv1alpha1.ConnectionConfig_GcpCloudstorageConfig:
+		var cfg *mgmtv1alpha1.GcpCloudStorageSchemaConfig
+		if opts.JobRunId != nil && *opts.JobRunId != "" {
+			cfg = &mgmtv1alpha1.GcpCloudStorageSchemaConfig{Id: &mgmtv1alpha1.GcpCloudStorageSchemaConfig_JobRunId{JobRunId: *opts.JobRunId}}
+		} else if opts.JobId != nil && *opts.JobId != "" {
+			cfg = &mgmtv1alpha1.GcpCloudStorageSchemaConfig{Id: &mgmtv1alpha1.GcpCloudStorageSchemaConfig_JobId{JobId: *opts.JobId}}
+		}
+		schemaReq.SchemaConfig = &mgmtv1alpha1.ConnectionSchemaConfig{
+			Config: &mgmtv1alpha1.ConnectionSchemaConfig_GcpCloudstorageConfig{
+				GcpCloudstorageConfig: cfg,
+			},
+		}
+	case *mgmtv1alpha1.ConnectionConfig_MongoConfig:
+		schemaReq.SchemaConfig = &mgmtv1alpha1.ConnectionSchemaConfig{
+			Config: &mgmtv1alpha1.ConnectionSchemaConfig_MongoConfig{
+				MongoConfig: &mgmtv1alpha1.MongoSchemaConfig{},
+			},
+		}
+	case *mgmtv1alpha1.ConnectionConfig_DynamodbConfig:
+		schemaReq.SchemaConfig = &mgmtv1alpha1.ConnectionSchemaConfig{
+			Config: &mgmtv1alpha1.ConnectionSchemaConfig_DynamodbConfig{},
+		}
+	case *mgmtv1alpha1.ConnectionConfig_MssqlConfig:
+		schemaReq.SchemaConfig = &mgmtv1alpha1.ConnectionSchemaConfig{
+			Config: &mgmtv1alpha1.ConnectionSchemaConfig_MssqlConfig{
+				MssqlConfig: &mgmtv1alpha1.MssqlSchemaConfig{},
+			},
+		}
 	default:
 		return nil, nucleuserrors.NewNotImplemented("this connection config is not currently supported")
 	}
@@ -747,18 +1026,19 @@ func (s *Service) getConnectionSchema(ctx context.Context, connection *mgmtv1alp
 
 func (s *Service) getConnectionTableSchema(ctx context.Context, connection *mgmtv1alpha1.Connection, schema, table string, logger *slog.Logger) ([]*mgmtv1alpha1.DatabaseColumn, error) {
 	conntimeout := uint32(5)
-	switch cconfig := connection.ConnectionConfig.Config.(type) {
+	switch connection.GetConnectionConfig().Config.(type) {
 	case *mgmtv1alpha1.ConnectionConfig_PgConfig:
-		conn, err := s.sqlConnector.NewPgPoolFromConnectionConfig(cconfig.PgConfig, &conntimeout, logger)
+		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.GetConnectionConfig(), logger, sqlconnect.WithConnectionTimeout(conntimeout))
 		if err != nil {
 			return nil, err
 		}
 		defer conn.Close()
-		db, err := conn.Open(ctx)
+		db, err := conn.Open()
 		if err != nil {
 			return nil, err
 		}
-		dbschema, err := s.pgquerier.GetDatabaseTableSchema(ctx, db, &pg_queries.GetDatabaseTableSchemaParams{Schema: schema, Table: table})
+		schematable := sqlmanager_shared.SchemaTable{Schema: schema, Table: table}
+		dbschema, err := s.pgquerier.GetDatabaseTableSchemasBySchemasAndTables(ctx, db, []string{schematable.String()})
 		if err != nil {
 			return nil, err
 		}
@@ -774,7 +1054,7 @@ func (s *Service) getConnectionTableSchema(ctx context.Context, connection *mgmt
 		}
 		return schemas, nil
 	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig:
-		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.ConnectionConfig, &conntimeout, logger)
+		conn, err := s.sqlConnector.NewDbFromConnectionConfig(connection.GetConnectionConfig(), logger, sqlconnect.WithConnectionTimeout(conntimeout))
 		if err != nil {
 			return nil, err
 		}
@@ -806,13 +1086,12 @@ func (s *Service) getConnectionTableSchema(ctx context.Context, connection *mgmt
 	}
 }
 
-// returns the first job run id for a given job that is in S3
-func (s *Service) getLastestJobRunFromAwsS3(
+func (s *Service) getLatestJobRunFromGcs(
 	ctx context.Context,
-	logger *slog.Logger,
-	s3Client *s3.Client,
-	jobId, bucket string,
-	region *string,
+	client neosync_gcp.ClientInterface,
+	jobId string,
+	bucket string,
+	pathPrefix *string,
 ) (string, error) {
 	jobRunsResp, err := s.jobService.GetJobRecentRuns(ctx, connect.NewRequest(&mgmtv1alpha1.GetJobRecentRunsRequest{
 		JobId: jobId,
@@ -821,27 +1100,75 @@ func (s *Service) getLastestJobRunFromAwsS3(
 		return "", err
 	}
 	jobRuns := jobRunsResp.Msg.GetRecentRuns()
-
 	for i := len(jobRuns) - 1; i >= 0; i-- {
-		runId := jobRuns[i].JobRunId
-		path := fmt.Sprintf("workflows/%s/activities/", runId)
-		output, err := s.awsManager.ListObjectsV2(ctx, s3Client, region, &s3.ListObjectsV2Input{
-			Bucket:    aws.String(bucket),
-			Prefix:    aws.String(path),
-			Delimiter: aws.String("/"),
-		})
+		runId := jobRuns[i].GetJobRunId()
+		prefix := neosync_gcp.GetWorkflowActivityPrefix(
+			runId,
+			pathPrefix,
+		)
+		ok, err := client.DoesPrefixContainTables(ctx, bucket, prefix)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("unable to check if prefix contains tables: %w", err)
 		}
-		if output == nil {
-			continue
-		}
-		if *output.KeyCount > 0 {
-			logger.Info(fmt.Sprintf("found latest job run: %s", runId))
+		if ok {
 			return runId, nil
 		}
 	}
-	return "", nucleuserrors.NewInternalError(fmt.Sprintf("unable to find latest job run for job: %s", jobId))
+	return "", fmt.Errorf("unable to find latest job run for job: %s", jobId)
+}
+
+// returns the first job run id for a given job that is in S3
+func (s *Service) getLastestJobRunFromAwsS3(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Client *s3.Client,
+	jobId,
+	bucket string,
+	region *string,
+	s3pathpieces []string,
+) (string, error) {
+	pieces := []string{}
+	pieces = append(pieces, s3pathpieces...)
+	pieces = append(pieces, "workflows", jobId)
+	path := strings.Join(pieces, "/")
+
+	var continuationToken *string
+	done := false
+	commonPrefixes := []string{}
+	for !done {
+		output, err := s.awsManager.ListObjectsV2(ctx, s3Client, region, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Prefix:            aws.String(path),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return "", fmt.Errorf("unable to list job run directories from s3: %w", err)
+		}
+		continuationToken = output.NextContinuationToken
+		done = !*output.IsTruncated
+		for _, cp := range output.CommonPrefixes {
+			commonPrefixes = append(commonPrefixes, *cp.Prefix)
+		}
+	}
+
+	logger.Debug(fmt.Sprintf("found %d common prefixes for job in s3", len(commonPrefixes)))
+
+	runIDs := make([]string, 0, len(commonPrefixes))
+	for _, prefix := range commonPrefixes {
+		parts := strings.Split(strings.TrimSuffix(prefix, "/"), "/")
+		if len(parts) >= 2 {
+			runID := parts[len(parts)-1]
+			runIDs = append(runIDs, runID)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(runIDs)))
+
+	if len(runIDs) == 0 {
+		return "", nucleuserrors.NewNotFound(fmt.Sprintf("unable to find latest job run for job in s3 after processing common prefixes: %s", jobId))
+	}
+	logger.Debug(fmt.Sprintf("found %d run ids for job in s3", len(runIDs)))
+	return runIDs[0], nil
 }
 
 func (s *Service) areSchemaAndTableValid(ctx context.Context, connection *mgmtv1alpha1.Connection, schema, table string) error {
@@ -905,20 +1232,19 @@ func (s *Service) GetConnectionUniqueConstraints(
 		schemas = append(schemas, s)
 	}
 
-	connectionTimeout := 5
-	db, err := s.sqlmanager.NewSqlDb(ctx, logger, connection.Msg.GetConnection(), &connectionTimeout)
+	db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Db.Close()
+	defer db.Db().Close()
 
-	ucMap, err := db.Db.GetUniqueConstraintsMap(ctx, schemas)
+	constraints, err := db.Db().GetTableConstraintsBySchema(ctx, schemas)
 	if err != nil {
 		return nil, err
 	}
 
 	tableConstraints := map[string]*mgmtv1alpha1.UniqueConstraint{}
-	for tableName, uc := range ucMap {
+	for tableName, uc := range constraints.UniqueConstraints {
 		columns := []string{}
 		for _, c := range uc {
 			columns = append(columns, c...)
@@ -984,7 +1310,7 @@ func (s *Service) GetAiGeneratedData(
 
 	conversation := []azopenai.ChatRequestMessageClassification{
 		&azopenai.ChatRequestSystemMessage{
-			Content: ptr(fmt.Sprintf("You generate data in JSON format. Generate %d records in a json array located on the data key", req.Msg.GetCount())),
+			Content: azopenai.NewChatRequestSystemMessageContent(fmt.Sprintf("You generate data in JSON format. Generate %d records in a json array located on the data key", req.Msg.GetCount())),
 		},
 		&azopenai.ChatRequestUserMessage{
 			Content: azopenai.NewChatRequestUserMessageContent(fmt.Sprintf("%s\n%s", req.Msg.GetUserPrompt(), fmt.Sprintf("Each record looks like this: %s", strings.Join(columns, ",")))),
@@ -1032,4 +1358,128 @@ func (s *Service) GetAiGeneratedData(
 
 func ptr[T any](val T) *T {
 	return &val
+}
+
+func (s *Service) GetConnectionTableConstraints(
+	ctx context.Context,
+	req *connect.Request[mgmtv1alpha1.GetConnectionTableConstraintsRequest],
+) (*connect.Response[mgmtv1alpha1.GetConnectionTableConstraintsResponse], error) {
+	logger := logger_interceptor.GetLoggerFromContextOrDefault(ctx)
+	connection, err := s.connectionService.GetConnection(ctx, connect.NewRequest(&mgmtv1alpha1.GetConnectionRequest{
+		Id: req.Msg.ConnectionId,
+	}))
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = s.verifyUserInAccount(ctx, connection.Msg.Connection.AccountId)
+	if err != nil {
+		return nil, err
+	}
+
+	schemaResp, err := s.getConnectionSchema(ctx, connection.Msg.Connection, &schemaOpts{})
+	if err != nil {
+		return nil, err
+	}
+
+	schemaMap := map[string]struct{}{}
+	for _, s := range schemaResp {
+		schemaMap[s.Schema] = struct{}{}
+	}
+	schemas := []string{}
+	for s := range schemaMap {
+		schemas = append(schemas, s)
+	}
+
+	switch connection.Msg.GetConnection().GetConnectionConfig().GetConfig().(type) {
+	case *mgmtv1alpha1.ConnectionConfig_MysqlConfig, *mgmtv1alpha1.ConnectionConfig_PgConfig, *mgmtv1alpha1.ConnectionConfig_MssqlConfig:
+		db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Db().Close()
+		tableConstraints, err := db.Db().GetTableConstraintsBySchema(ctx, schemas)
+		if err != nil {
+			return nil, err
+		}
+
+		fkConstraintsMap := map[string]*mgmtv1alpha1.ForeignConstraintTables{}
+		for tableName, d := range tableConstraints.ForeignKeyConstraints {
+			fkConstraintsMap[tableName] = &mgmtv1alpha1.ForeignConstraintTables{
+				Constraints: []*mgmtv1alpha1.ForeignConstraint{},
+			}
+			for _, constraint := range d {
+				fkConstraintsMap[tableName].Constraints = append(fkConstraintsMap[tableName].Constraints, &mgmtv1alpha1.ForeignConstraint{
+					Columns: constraint.Columns, NotNullable: constraint.NotNullable, ForeignKey: &mgmtv1alpha1.ForeignKey{
+						Table:   constraint.ForeignKey.Table,
+						Columns: constraint.ForeignKey.Columns,
+					},
+				})
+			}
+		}
+
+		pkConstraintsMap := map[string]*mgmtv1alpha1.PrimaryConstraint{}
+		for table, pks := range tableConstraints.PrimaryKeyConstraints {
+			pkConstraintsMap[table] = &mgmtv1alpha1.PrimaryConstraint{
+				Columns: pks,
+			}
+		}
+
+		uniqueConstraintsMap := map[string]*mgmtv1alpha1.UniqueConstraints{}
+		for table, uniqueConstraints := range tableConstraints.UniqueConstraints {
+			uniqueConstraintsMap[table] = &mgmtv1alpha1.UniqueConstraints{
+				Constraints: []*mgmtv1alpha1.UniqueConstraint{},
+			}
+			for _, uc := range uniqueConstraints {
+				uniqueConstraintsMap[table].Constraints = append(uniqueConstraintsMap[table].Constraints, &mgmtv1alpha1.UniqueConstraint{
+					Columns: uc,
+				})
+			}
+		}
+
+		return connect.NewResponse(&mgmtv1alpha1.GetConnectionTableConstraintsResponse{
+			ForeignKeyConstraints: fkConstraintsMap,
+			PrimaryKeyConstraints: pkConstraintsMap,
+			UniqueConstraints:     uniqueConstraintsMap,
+		}), nil
+	}
+	return connect.NewResponse(&mgmtv1alpha1.GetConnectionTableConstraintsResponse{}), nil
+}
+
+func (s *Service) GetTableRowCount(
+	ctx context.Context,
+	req *connect.Request[mgmtv1alpha1.GetTableRowCountRequest],
+) (*connect.Response[mgmtv1alpha1.GetTableRowCountResponse], error) {
+	logger := logger_interceptor.GetLoggerFromContextOrDefault(ctx)
+	connection, err := s.connectionService.GetConnection(ctx, connect.NewRequest(&mgmtv1alpha1.GetConnectionRequest{
+		Id: req.Msg.ConnectionId,
+	}))
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = s.verifyUserInAccount(ctx, connection.Msg.Connection.AccountId)
+	if err != nil {
+		return nil, err
+	}
+
+	switch connection.Msg.GetConnection().GetConnectionConfig().Config.(type) {
+	case *mgmtv1alpha1.ConnectionConfig_PgConfig, *mgmtv1alpha1.ConnectionConfig_MysqlConfig, *mgmtv1alpha1.ConnectionConfig_MssqlConfig:
+		db, err := s.sqlmanager.NewSqlConnection(ctx, connectionmanager.NewUniqueSession(), connection.Msg.GetConnection(), logger)
+		if err != nil {
+			return nil, err
+		}
+		defer db.Db().Close()
+
+		count, err := db.Db().GetTableRowCount(ctx, req.Msg.Schema, req.Msg.Table, req.Msg.WhereClause)
+		if err != nil {
+			return nil, err
+		}
+
+		return connect.NewResponse(&mgmtv1alpha1.GetTableRowCountResponse{
+			Count: count,
+		}), nil
+	default:
+		return nil, fmt.Errorf("unsupported connection type when retrieving table row count %T", connection.Msg.GetConnection().GetConnectionConfig().Config)
+	}
 }

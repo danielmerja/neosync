@@ -1,12 +1,20 @@
-FROM alpine:3.18
+# Build the manager binary
+FROM golang:1.23-bookworm AS builder
 
-RUN mkdir -p .config/helm/registry
-RUN mkdir /app
+WORKDIR /workspace
 
-WORKDIR /app
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive \
+  apt-get install --no-install-recommends -y \
+    build-essential
 
-RUN echo 'NUCLEUS_ENV=dev' > /app/.env
+RUN go install github.com/air-verse/air@v1.61.1
 
-COPY /bin/worker /app
+# Copy the Go Modules manifests
+COPY go.mod go.sum ./
 
-ENTRYPOINT ["/app/worker", "serve"]
+RUN go mod download
+
+COPY worker/dev/build/.air.toml .air.toml
+
+CMD ["air", "-c", "/workspace/.air.toml"]

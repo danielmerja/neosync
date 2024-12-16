@@ -3,30 +3,45 @@ package syncrediscleanup_activity
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"os"
 	"time"
 
-	neosync_redis "github.com/nucleuscloud/neosync/worker/internal/redis"
+	temporallogger "github.com/nucleuscloud/neosync/worker/internal/temporal-logger"
 	redis "github.com/redis/go-redis/v9"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/log"
 )
 
+type Activity struct {
+	redisclient redis.UniversalClient
+}
+
+func New(
+	redisclient redis.UniversalClient,
+) *Activity {
+	return &Activity{
+		redisclient: redisclient,
+	}
+}
+
 type DeleteRedisHashRequest struct {
-	JobId      string
-	WorkflowId string
-	HashKey    string
+	JobId   string
+	HashKey string
 }
 
 type DeleteRedisHashResponse struct {
 }
 
-func DeleteRedisHash(
+func (a *Activity) DeleteRedisHash(
 	ctx context.Context,
 	req *DeleteRedisHashRequest,
 ) (*DeleteRedisHashResponse, error) {
-	logger := activity.GetLogger(ctx)
-	_ = logger
+	activityInfo := activity.GetInfo(ctx)
+	logger := log.With(
+		activity.GetLogger(ctx),
+		"jobId", req.JobId,
+		"WorkflowID", activityInfo.WorkflowExecution.ID,
+		"RunID", activityInfo.WorkflowExecution.RunID,
+	)
 	go func() {
 		for {
 			select {
@@ -38,30 +53,32 @@ func DeleteRedisHash(
 		}
 	}()
 
-	slogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
+	slogger := temporallogger.NewSlogger(logger)
 	slogger = slogger.With(
-		"WorkflowID", req.WorkflowId,
+		"jobId", req.JobId,
+		"WorkflowID", activityInfo.WorkflowExecution.ID,
+		"RunID", activityInfo.WorkflowExecution.RunID,
 		"RedisHashKey", req.HashKey,
 	)
 
-	redisClient, err := neosync_redis.GetRedisClient()
-	if err != nil {
-		return nil, err
+	if a.redisclient == nil {
+		return nil, fmt.Errorf("missing redis client. this operation requires redis.")
 	}
+	slogger.Debug("redis client provided")
 
-	err = deleteRedisHashByKey(slogger, ctx, redisClient, req.HashKey)
+	err := deleteRedisHashByKey(ctx, a.redisclient, req.HashKey)
 	if err != nil {
 		return nil, err
 	}
+	slogger.Debug("deleted redis key")
 
 	return &DeleteRedisHashResponse{}, nil
 }
 
-func deleteRedisHashByKey(logger *slog.Logger, ctx context.Context, client redis.UniversalClient, key string) error {
+func deleteRedisHashByKey(ctx context.Context, client redis.UniversalClient, key string) error {
 	err := client.Del(ctx, key).Err()
 	if err != nil {
-		logger.Error(fmt.Sprintf("failed to delete redis hash: %v", err))
-		return err
+		return fmt.Errorf("failed to delete redis hash: %w", err)
 	}
 	return nil
 }

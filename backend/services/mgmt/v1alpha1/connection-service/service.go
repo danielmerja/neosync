@@ -1,25 +1,22 @@
 package v1alpha1_connectionservice
 
 import (
-	"sync"
-
-	mysql_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/mysql"
-	pg_queries "github.com/nucleuscloud/neosync/backend/gen/go/db/dbschemas/postgresql"
 	"github.com/nucleuscloud/neosync/backend/gen/go/protos/mgmt/v1alpha1/mgmtv1alpha1connect"
-	"github.com/nucleuscloud/neosync/backend/internal/nucleusdb"
+	"github.com/nucleuscloud/neosync/backend/internal/neosyncdb"
+	"github.com/nucleuscloud/neosync/backend/pkg/mongoconnect"
 	"github.com/nucleuscloud/neosync/backend/pkg/sqlconnect"
 	sql_manager "github.com/nucleuscloud/neosync/backend/pkg/sqlmanager"
+	awsmanager "github.com/nucleuscloud/neosync/internal/aws"
 )
 
 type Service struct {
 	cfg                *Config
-	db                 *nucleusdb.NucleusDb
+	db                 *neosyncdb.NeosyncDb
 	useraccountService mgmtv1alpha1connect.UserAccountServiceClient
 	sqlConnector       sqlconnect.SqlConnector
 	sqlmanager         sql_manager.SqlManagerClient
-
-	pgquerier    pg_queries.Querier
-	mysqlquerier mysql_queries.Querier
+	mongoconnector     mongoconnect.Interface
+	awsManager         awsmanager.NeosyncAwsManagerClient
 }
 
 type Config struct {
@@ -27,22 +24,20 @@ type Config struct {
 
 func New(
 	cfg *Config,
-	db *nucleusdb.NucleusDb,
+	db *neosyncdb.NeosyncDb,
 	useraccountService mgmtv1alpha1connect.UserAccountServiceClient,
-	sqlConnector sqlconnect.SqlConnector,
-	pgquerier pg_queries.Querier,
-	mysqlquerier mysql_queries.Querier,
+	mongoconnector mongoconnect.Interface,
+	awsManager awsmanager.NeosyncAwsManagerClient,
+	sqlmanager sql_manager.SqlManagerClient,
+	sqlconnector sqlconnect.SqlConnector,
 ) *Service {
-	pgpoolmap := &sync.Map{}
-	mysqlpoolmap := &sync.Map{}
-	sqlmanager := sql_manager.NewSqlManager(pgpoolmap, pgquerier, mysqlpoolmap, mysqlquerier, sqlConnector)
 	return &Service{
 		cfg:                cfg,
 		db:                 db,
 		useraccountService: useraccountService,
-		sqlConnector:       sqlConnector,
-		pgquerier:          pgquerier,
-		mysqlquerier:       mysqlquerier,
 		sqlmanager:         sqlmanager,
+		mongoconnector:     mongoconnector,
+		awsManager:         awsManager,
+		sqlConnector:       sqlconnector,
 	}
 }

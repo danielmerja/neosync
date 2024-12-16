@@ -2,11 +2,13 @@ import ButtonText from '@/components/ButtonText';
 import DeleteConfirmationDialog from '@/components/DeleteConfirmationDialog';
 import { useAccount } from '@/components/providers/account-provider';
 import { Button } from '@/components/ui/button';
-import { useToast } from '@/components/ui/use-toast';
 import { getErrorMessage } from '@/util/util';
+import { useMutation } from '@connectrpc/connect-query';
+import { deleteUserDefinedTransformer } from '@neosync/sdk/connectquery';
 import { TrashIcon } from '@radix-ui/react-icons';
 import { useRouter } from 'next/navigation';
 import { ReactElement } from 'react';
+import { toast } from 'sonner';
 
 interface Props {
   transformerID: string;
@@ -15,23 +17,18 @@ interface Props {
 export default function RemoveTransformerButton(props: Props): ReactElement {
   const { transformerID } = props;
   const router = useRouter();
-  const { toast } = useToast();
   const { account } = useAccount();
+  const { mutateAsync } = useMutation(deleteUserDefinedTransformer);
 
   async function deleteTransformer(): Promise<void> {
     try {
-      await removeTransformer(account?.id ?? '', transformerID);
-      toast({
-        title: 'Successfully removed transformer!',
-        variant: 'success',
-      });
+      await mutateAsync({ transformerId: transformerID });
+      toast.success('Successfully removed transformer!');
       router.push(`/${account?.name}/transformers`);
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Unable to remove transformer',
+      toast.error('Unable to remove transformer', {
         description: getErrorMessage(err),
-        variant: 'destructive',
       });
     }
   }
@@ -47,21 +44,4 @@ export default function RemoveTransformerButton(props: Props): ReactElement {
       onConfirm={async () => deleteTransformer()}
     />
   );
-}
-
-async function removeTransformer(
-  accountId: string,
-  transformerId: string
-): Promise<void> {
-  const res = await fetch(
-    `/api/accounts/${accountId}/transformers/user-defined?transformerId=${transformerId}`,
-    {
-      method: 'DELETE',
-    }
-  );
-  if (!res.ok) {
-    const body = await res.json();
-    throw new Error(body.message);
-  }
-  await res.json();
 }

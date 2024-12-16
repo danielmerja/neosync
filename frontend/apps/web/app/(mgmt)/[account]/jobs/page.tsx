@@ -1,17 +1,19 @@
 'use client';
 import ButtonText from '@/components/ButtonText';
 import OverviewContainer from '@/components/containers/OverviewContainer';
+import EmptyState, { EmptyStateLinkButton } from '@/components/EmptyState';
 import PageHeader from '@/components/headers/PageHeader';
 import { useAccount } from '@/components/providers/account-provider';
 import SkeletonTable from '@/components/skeleton/SkeletonTable';
 import { Button } from '@/components/ui/button';
-import { useGetJobStatuses } from '@/libs/hooks/useGetJobStatuses';
-import { useGetJobs } from '@/libs/hooks/useGetJobs';
+import { useQuery } from '@connectrpc/connect-query';
 import { JobStatus } from '@neosync/sdk';
+import { getJobs, getJobStatuses } from '@neosync/sdk/connectquery';
 import { PlusIcon } from '@radix-ui/react-icons';
 import NextLink from 'next/link';
 import { usePostHog } from 'posthog-js/react';
 import { ReactElement, useMemo } from 'react';
+import { GrPowerCycle } from 'react-icons/gr';
 import { getColumns } from './components/DataTable/columns';
 import { DataTable } from './components/DataTable/data-table';
 
@@ -33,8 +35,16 @@ interface JobTableProps {}
 function JobTable(props: JobTableProps): ReactElement {
   const {} = props;
   const { account } = useAccount();
-  const { isLoading, data, mutate } = useGetJobs(account?.id ?? '');
-  const { data: statusData } = useGetJobStatuses(account?.id ?? '');
+  const {
+    isLoading,
+    data,
+    refetch: mutate,
+  } = useQuery(getJobs, { accountId: account?.id }, { enabled: !!account?.id });
+  const { data: statusData } = useQuery(
+    getJobStatuses,
+    { accountId: account?.id },
+    { enabled: !!account?.id }
+  );
   const columns = useMemo(
     () =>
       getColumns({
@@ -75,7 +85,21 @@ function JobTable(props: JobTableProps): ReactElement {
 
   return (
     <div>
-      <DataTable columns={columns} data={jobData} />
+      {jobData.length == 0 ? (
+        <EmptyState
+          title="No Jobs yet"
+          description="Jobs are async workflows that transform data and sync it between source and destination systems."
+          icon={<GrPowerCycle className="w-8 h-8 text-primary" />}
+          extra={
+            <EmptyStateLinkButton
+              buttonText="Create your first job"
+              href={`/${account?.name}/new/job`}
+            />
+          }
+        />
+      ) : (
+        <DataTable columns={columns} data={jobData} />
+      )}
     </div>
   );
 }
